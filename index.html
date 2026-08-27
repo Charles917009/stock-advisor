@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>台股美股買入建議系統</title>
+    <link rel="stylesheet" href="styles.css">
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body>
+    <header class="header">
+        <div class="container">
+            <h1><i class="fas fa-chart-line"></i> 台股美股買入建議系統</h1>
+            <p class="subtitle">技術指標分析 × 基本面篩選 × 綜合評分</p>
+        </div>
+    </header>
+
+    <main class="container">
+        <!-- 搜尋區塊 -->
+        <section class="search-section">
+            <div class="search-box">
+                <div class="market-toggle">
+                    <button class="toggle-btn active" data-market="tw">🇹🇼 台股</button>
+                    <button class="toggle-btn" data-market="us">🇺🇸 美股</button>
+                </div>
+                <div class="search-input-group">
+                    <input type="text" id="stockInput" placeholder="輸入股票代號（如：2330、AAPL）" autocomplete="off">
+                    <button id="analyzeBtn" class="btn-primary">
+                        <i class="fas fa-search"></i> 分析
+                    </button>
+                </div>
+                <div class="quick-picks">
+                    <span class="label">熱門：</span>
+                    <button class="quick-btn" data-symbol="2330" data-market="tw">台積電</button>
+                    <button class="quick-btn" data-symbol="2317" data-market="tw">鴻海</button>
+                    <button class="quick-btn" data-symbol="0050" data-market="tw">元大50</button>
+                    <button class="quick-btn" data-symbol="AAPL" data-market="us">Apple</button>
+                    <button class="quick-btn" data-symbol="NVDA" data-market="us">NVIDIA</button>
+                    <button class="quick-btn" data-symbol="TSLA" data-market="us">Tesla</button>
+                </div>
+            </div>
+        </section>
+
+        <!-- 自動篩選區塊 -->
+        <section class="screener-section">
+            <div class="screener-box">
+                <div class="screener-header">
+                    <h2><i class="fas fa-filter"></i> 自動篩選建議買入</h2>
+                    <p class="screener-desc">一鍵掃描熱門股票，自動找出技術面表現優異的標的</p>
+                </div>
+                <div class="screener-controls">
+                    <div class="screener-market-toggle">
+                        <button class="screener-toggle-btn active" data-screener-market="tw">🇹🇼 台股熱門</button>
+                        <button class="screener-toggle-btn" data-screener-market="us">🇺🇸 美股熱門</button>
+                        <button class="screener-toggle-btn" data-screener-market="all">🌐 全部掃描</button>
+                    </div>
+                    <div class="screener-options">
+                        <label class="screener-option">
+                            <span>最低評分門檻：</span>
+                            <select id="minScoreFilter">
+                                <option value="60">60 分（建議買入）</option>
+                                <option value="70">70 分（強力推薦）</option>
+                                <option value="50">50 分（含觀望）</option>
+                            </select>
+                        </label>
+                    </div>
+                    <button id="screenerBtn" class="btn-screener">
+                        <i class="fas fa-radar"></i> 開始篩選
+                    </button>
+                </div>
+                <!-- 篩選進度 -->
+                <div id="screenerProgress" class="screener-progress hidden">
+                    <div class="progress-bar-container">
+                        <div id="progressBar" class="progress-bar-fill"></div>
+                    </div>
+                    <p id="progressText">正在掃描...</p>
+                </div>
+                <!-- 篩選結果 -->
+                <div id="screenerResults" class="screener-results hidden">
+                    <div class="results-header">
+                        <h3><i class="fas fa-trophy"></i> 篩選結果</h3>
+                        <span id="resultCount" class="result-count">0 檔符合</span>
+                    </div>
+                    <div class="results-table-wrapper">
+                        <table class="results-table">
+                            <thead>
+                                <tr>
+                                    <th>排名</th>
+                                    <th>股票</th>
+                                    <th>現價</th>
+                                    <th>漲跌幅</th>
+                                    <th>綜合評分</th>
+                                    <th>技術面</th>
+                                    <th>趨勢面</th>
+                                    <th>建議</th>
+                                    <th>操作</th>
+                                </tr>
+                            </thead>
+                            <tbody id="screenerTableBody">
+                            </tbody>
+                        </table>
+                    </div>
+                    <div id="noResults" class="no-results hidden">
+                        <i class="fas fa-search"></i>
+                        <p>目前沒有符合條件的股票，可嘗試降低評分門檻</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- 載入動畫 -->
+        <div id="loading" class="loading hidden">
+            <div class="spinner"></div>
+            <p>正在分析股票數據...</p>
+        </div>
+
+        <!-- 結果區塊 -->
+        <section id="resultSection" class="result-section hidden">
+            <!-- 股票基本資訊 -->
+            <div class="stock-header">
+                <div class="stock-info">
+                    <h2 id="stockName">—</h2>
+                    <span id="stockSymbol" class="symbol-badge">—</span>
+                    <span id="stockMarket" class="market-badge">—</span>
+                </div>
+                <div class="stock-price">
+                    <span id="currentPrice" class="price">—</span>
+                    <span id="priceChange" class="change">—</span>
+                </div>
+            </div>
+
+            <!-- 綜合評分 -->
+            <div class="score-card">
+                <div class="score-circle">
+                    <svg viewBox="0 0 120 120">
+                        <circle class="score-bg" cx="60" cy="60" r="54"></circle>
+                        <circle id="scoreCircle" class="score-fill" cx="60" cy="60" r="54"></circle>
+                    </svg>
+                    <div class="score-text">
+                        <span id="totalScore" class="score-number">—</span>
+                        <span class="score-label">綜合評分</span>
+                    </div>
+                </div>
+                <div class="recommendation">
+                    <div id="recommendBadge" class="recommend-badge">—</div>
+                    <p id="recommendText" class="recommend-text">等待分析...</p>
+                </div>
+                <div class="score-breakdown">
+                    <div class="score-item">
+                        <span class="score-item-label">技術面</span>
+                        <div class="score-bar">
+                            <div id="techBar" class="score-bar-fill" style="width: 0%"></div>
+                        </div>
+                        <span id="techScore" class="score-item-value">—</span>
+                    </div>
+                    <div class="score-item">
+                        <span class="score-item-label">基本面</span>
+                        <div class="score-bar">
+                            <div id="fundBar" class="score-bar-fill" style="width: 0%"></div>
+                        </div>
+                        <span id="fundScore" class="score-item-value">—</span>
+                    </div>
+                    <div class="score-item">
+                        <span class="score-item-label">趨勢面</span>
+                        <div class="score-bar">
+                            <div id="trendBar" class="score-bar-fill" style="width: 0%"></div>
+                        </div>
+                        <span id="trendScore" class="score-item-value">—</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 技術指標 -->
+            <div class="indicators-grid">
+                <div class="indicator-card">
+                    <h3><i class="fas fa-wave-square"></i> 移動平均線 (MA)</h3>
+                    <div class="indicator-content" id="maContent">—</div>
+                </div>
+                <div class="indicator-card">
+                    <h3><i class="fas fa-tachometer-alt"></i> RSI 相對強弱指標</h3>
+                    <div class="indicator-content" id="rsiContent">—</div>
+                </div>
+                <div class="indicator-card">
+                    <h3><i class="fas fa-chart-bar"></i> MACD</h3>
+                    <div class="indicator-content" id="macdContent">—</div>
+                </div>
+                <div class="indicator-card">
+                    <h3><i class="fas fa-random"></i> KD 隨機指標</h3>
+                    <div class="indicator-content" id="kdContent">—</div>
+                </div>
+                <div class="indicator-card">
+                    <h3><i class="fas fa-volume-up"></i> 成交量分析</h3>
+                    <div class="indicator-content" id="volumeContent">—</div>
+                </div>
+                <div class="indicator-card">
+                    <h3><i class="fas fa-arrows-alt-v"></i> 布林通道</h3>
+                    <div class="indicator-content" id="bollingerContent">—</div>
+                </div>
+            </div>
+
+            <!-- 基本面分析 -->
+            <div class="fundamental-section">
+                <h3><i class="fas fa-building"></i> 基本面分析</h3>
+                <div class="fundamental-grid" id="fundamentalGrid">
+                    —
+                </div>
+            </div>
+
+            <!-- AI 新聞情緒分析 -->
+            <div class="sentiment-section">
+                <h3><i class="fas fa-brain"></i> AI 新聞情緒分析（Gemini）</h3>
+                <div class="api-key-bar">
+                    <label for="geminiKeyInput"><i class="fas fa-key"></i> Gemini API Key：</label>
+                    <input type="password" id="geminiKeyInput" placeholder="貼上你的 API Key（AIzaSy...）" autocomplete="off">
+                    <button id="saveKeyBtn" class="btn-save-key">儲存</button>
+                    <span id="keyStatus" class="key-status"></span>
+                </div>
+                <div id="sentimentLoading" class="sentiment-loading hidden">
+                    <div class="mini-spinner"></div>
+                    <span>Gemini 正在分析新聞情緒...</span>
+                </div>
+                <div id="sentimentContent" class="sentiment-content">
+                    <div class="sentiment-summary">
+                        <div class="sentiment-meter">
+                            <div class="meter-label">市場情緒</div>
+                            <div class="meter-bar">
+                                <div id="sentimentBar" class="meter-fill neutral" style="width: 50%"></div>
+                            </div>
+                            <div class="meter-labels">
+                                <span class="bearish-label">極度恐懼</span>
+                                <span class="neutral-label">中性</span>
+                                <span class="bullish-label">極度貪婪</span>
+                            </div>
+                        </div>
+                        <div class="sentiment-badge-wrapper">
+                            <span id="sentimentBadge" class="sentiment-badge neutral">等待分析</span>
+                            <span id="sentimentScore" class="sentiment-score">—</span>
+                        </div>
+                    </div>
+                    <div class="ai-analysis">
+                        <h4><i class="fas fa-robot"></i> AI 綜合研判</h4>
+                        <div id="aiAnalysis" class="ai-analysis-content">
+                            <p class="news-placeholder">設定 API Key 後，分析股票時將自動啟動 AI 情緒研判</p>
+                        </div>
+                    </div>
+                    <div class="news-list">
+                        <h4><i class="fas fa-newspaper"></i> 相關新聞</h4>
+                        <div id="newsList" class="news-items">
+                            <p class="news-placeholder">分析股票後將自動搜尋相關新聞</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 買入建議 -->
+            <div class="advice-section">
+                <h3><i class="fas fa-lightbulb"></i> 買入建議</h3>
+                <div id="adviceContent" class="advice-content">
+                    等待分析結果...
+                </div>
+            </div>
+
+            <!-- 風險提示 -->
+            <div class="disclaimer">
+                <p><i class="fas fa-exclamation-triangle"></i> 免責聲明：本系統提供的分析僅供參考，不構成任何投資建議。投資有風險，請依據個人風險承受能力做出決策。</p>
+            </div>
+        </section>
+    </main>
+
+    <footer class="footer">
+        <div class="container">
+            <p>© 2026 台股美股買入建議系統 | 數據來源：Yahoo Finance</p>
+        </div>
+    </footer>
+
+    <script src="app.js"></script>
+</body>
+</html>
