@@ -499,8 +499,8 @@ function displayResults(stockData, analysis) {
     // 基本面
     displayFundamentals(stockData, analysis);
 
-    // 買入建議
-    displayAdvice(analysis);
+    // 買入建議（AI）
+    displayAdvice(analysis, stockData);
 
     // AI 新聞情緒分析
     runSentimentAnalysis(stockData, analysis);
@@ -802,40 +802,121 @@ function displayFundamentals(stockData, analysis) {
 }
 
 // 顯示買入建議
-function displayAdvice(analysis) {
+function displayAdvice(analysis, stockData) {
     const adviceContent = document.getElementById('adviceContent');
     const { signals, totalScore } = analysis;
 
-    let html = '';
+    // 先顯示基礎建議（即時呈現）
+    let html = '<div class="advice-item neutral" style="border-left-color: var(--primary);"><i class="fas fa-spinner fa-spin"></i> AI 正在生成投資建議...</div>';
 
-    // 總結建議
-    if (totalScore >= 75) {
-        html += `<div class="advice-item positive"><strong>📈 總結：</strong>綜合評分 ${totalScore} 分，多項技術指標呈現看漲訊號，建議積極買入。可考慮在回調時分批進場。</div>`;
-    } else if (totalScore >= 60) {
-        html += `<div class="advice-item positive"><strong>📈 總結：</strong>綜合評分 ${totalScore} 分，整體偏多，建議可以開始關注並小量布局，等待更明確的買入訊號。</div>`;
-    } else if (totalScore >= 40) {
-        html += `<div class="advice-item neutral"><strong>⚖️ 總結：</strong>綜合評分 ${totalScore} 分，多空不明，建議觀望為主。若已持有可續抱，但不建議此時加碼。</div>`;
-    } else {
-        html += `<div class="advice-item negative"><strong>📉 總結：</strong>綜合評分 ${totalScore} 分，多項指標偏空，建議謹慎操作。若已持有可考慮減碼，等待止穩訊號。</div>`;
-    }
-
-    // 個別訊號
+    // 個別訊號先顯示
     signals.forEach(signal => {
         html += `<div class="advice-item ${signal.type}">• ${signal.text}</div>`;
     });
 
-    // 操作建議
-    html += '<div class="advice-item neutral" style="margin-top:16px; border-left-color:#1a73e8;"><strong>💡 操作建議：</strong>';
-    if (totalScore >= 60) {
-        html += '建議分批買入，設定停損點在近期支撐位下方 3-5%。可搭配量能觀察確認突破有效性。';
-    } else if (totalScore >= 40) {
-        html += '建議等待 KD 或 MACD 出現明確的黃金交叉訊號再進場。目前可先將該股加入觀察名單。';
-    } else {
-        html += '建議暫時觀望，等待技術指標出現底部反轉訊號（如 RSI 跌入超賣區後回升、KD 黃金交叉）再考慮進場。';
-    }
-    html += '</div>';
-
     adviceContent.innerHTML = html;
+
+    // 呼叫 Gemini 產生 AI 投資建議
+    generateAIAdvice(stockData, analysis).then(aiAdvice => {
+        let finalHtml = '';
+
+        if (aiAdvice) {
+            finalHtml += `<div class="advice-item positive" style="border-left-color: #8b5cf6; background: rgba(139, 92, 246, 0.05);"><strong>🤖 AI 投資建議：</strong><br><div style="margin-top:8px; white-space:pre-wrap;">${aiAdvice}</div></div>`;
+        } else {
+            // AI 失敗時退回規則建議
+            if (totalScore >= 75) {
+                finalHtml += `<div class="advice-item positive"><strong>📈 總結：</strong>綜合評分 ${totalScore} 分，多項技術指標呈現看漲訊號，建議積極買入。可考慮在回調時分批進場。</div>`;
+            } else if (totalScore >= 60) {
+                finalHtml += `<div class="advice-item positive"><strong>📈 總結：</strong>綜合評分 ${totalScore} 分，整體偏多，建議可以開始關注並小量布局，等待更明確的買入訊號。</div>`;
+            } else if (totalScore >= 40) {
+                finalHtml += `<div class="advice-item neutral"><strong>⚖️ 總結：</strong>綜合評分 ${totalScore} 分，多空不明，建議觀望為主。若已持有可續抱，但不建議此時加碼。</div>`;
+            } else {
+                finalHtml += `<div class="advice-item negative"><strong>📉 總結：</strong>綜合評分 ${totalScore} 分，多項指標偏空，建議謹慎操作。若已持有可考慮減碼，等待止穩訊號。</div>`;
+            }
+
+            finalHtml += '<div class="advice-item neutral" style="border-left-color: var(--primary);"><strong>💡 操作建議：</strong>';
+            if (totalScore >= 60) {
+                finalHtml += '建議分批買入，設定停損點在近期支撐位下方 3-5%。可搭配量能觀察確認突破有效性。';
+            } else if (totalScore >= 40) {
+                finalHtml += '建議等待 KD 或 MACD 出現明確的黃金交叉訊號再進場。目前可先將該股加入觀察名單。';
+            } else {
+                finalHtml += '建議暫時觀望，等待技術指標出現底部反轉訊號（如 RSI 跌入超賣區後回升、KD 黃金交叉）再考慮進場。';
+            }
+            finalHtml += '</div>';
+        }
+
+        // 加入個別訊號
+        signals.forEach(signal => {
+            finalHtml += `<div class="advice-item ${signal.type}">• ${signal.text}</div>`;
+        });
+
+        adviceContent.innerHTML = finalHtml;
+    });
+}
+
+// Gemini AI 投資建議
+async function generateAIAdvice(stockData, analysis) {
+    const apiKey = getGeminiKey();
+    if (!apiKey) return null;
+
+    const { indicators, totalScore, techScore, fundScore, trendScore } = analysis;
+    const currencySymbol = stockData.currency === 'TWD' ? 'NT$' : '$';
+
+    const prompt = `你是一位資深投資顧問，請根據以下數據對「${stockData.name}（${stockData.symbol}）」給出具體的投資建議。
+
+【基本資訊】
+- 市場：${stockData.market === 'tw' ? '台股' : '美股'}
+- 現價：${currencySymbol}${stockData.currentPrice.toFixed(2)}
+- 前收盤：${currencySymbol}${stockData.previousClose.toFixed(2)}
+
+【綜合評分】
+- 總分：${totalScore}/100
+- 技術面：${techScore}/100
+- 基本面：${fundScore}/100
+- 趨勢面：${trendScore}/100
+
+【技術指標】
+- MA5: ${indicators.ma.ma5?.toFixed(2) || 'N/A'}, MA20: ${indicators.ma.ma20?.toFixed(2) || 'N/A'}, MA60: ${indicators.ma.ma60?.toFixed(2) || 'N/A'}
+- RSI(14): ${indicators.rsi?.toFixed(1) || 'N/A'}
+- MACD柱狀體: ${indicators.macd?.histogram?.toFixed(3) || 'N/A'}
+- KD: K=${indicators.kd?.k?.toFixed(1) || 'N/A'}, D=${indicators.kd?.d?.toFixed(1) || 'N/A'}
+- 成交量比: ${indicators.volume?.ratio?.toFixed(2) || 'N/A'}x (vs 20日均量)
+- 布林通道: 上軌${indicators.bollinger?.upper?.toFixed(2) || 'N/A'} / 中軌${indicators.bollinger?.middle?.toFixed(2) || 'N/A'} / 下軌${indicators.bollinger?.lower?.toFixed(2) || 'N/A'}
+
+請用繁體中文回覆，包含以下內容：
+1. 【投資評等】明確給出：強力買進 / 買進 / 中性 / 減碼 / 賣出
+2. 【理由摘要】30字內說明核心邏輯
+3. 【進場策略】建議的買入價位區間、分批策略
+4. 【停損設定】建議停損價位和百分比
+5. 【目標價位】短期（1-2週）和中期（1-3月）目標
+6. 【風險提醒】主要需注意的風險因素
+
+請簡潔有力，總字數不超過 300 字。`;
+
+    try {
+        const response = await fetch(
+            `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`,
+            {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    contents: [{ parts: [{ text: prompt }] }],
+                    generationConfig: {
+                        temperature: 0.6,
+                        maxOutputTokens: 600
+                    }
+                })
+            }
+        );
+
+        if (!response.ok) return null;
+
+        const data = await response.json();
+        return data.candidates?.[0]?.content?.parts?.[0]?.text || null;
+    } catch (error) {
+        console.error('AI 投資建議生成失敗:', error);
+        return null;
+    }
 }
 
 // ===== 工具函數 =====
