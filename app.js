@@ -73,9 +73,9 @@ async function fetchStockData(symbol, market) {
 
     // 使用多個 CORS proxy 備援
     const corsProxies = [
-        `https://corsproxy.io/?${encodeURIComponent(yahooUrl)}`,
         `https://api.allorigins.win/raw?url=${encodeURIComponent(yahooUrl)}`,
-        `https://cors-anywhere.herokuapp.com/${yahooUrl}`
+        `https://corsproxy.io/?${encodeURIComponent(yahooUrl)}`,
+        `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(yahooUrl)}`
     ];
 
     let response = null;
@@ -997,8 +997,9 @@ async function fetchTrendingTickers(region = 'US') {
     const url = `https://query1.finance.yahoo.com/v1/finance/trending/${region}?count=25`;
 
     const corsProxies = [
+        `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
         `https://corsproxy.io/?${encodeURIComponent(url)}`,
-        `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`
+        `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`
     ];
 
     for (const proxyUrl of corsProxies) {
