@@ -853,8 +853,8 @@ function showLoading(show) {
 
 // ===== 自動篩選功能 =====
 
-// 熱門股票清單
-const STOCK_LISTS = {
+// 熱門股票清單（備用靜態清單，當 API 失敗時使用）
+const STOCK_LISTS_FALLBACK = {
     tw: [
         { symbol: '2330', name: '台積電' },
         { symbol: '2317', name: '鴻海' },
@@ -911,6 +911,87 @@ const STOCK_LISTS = {
     ]
 };
 
+// 取得即時熱門股票（Yahoo Finance Trending）
+async function fetchTrendingTickers(region = 'US') {
+    const url = `https://query1.finance.yahoo.com/v1/finance/trending/${region}?count=25`;
+
+    const corsProxies = [
+        `https://corsproxy.io/?${encodeURIComponent(url)}`,
+        `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`
+    ];
+
+    for (const proxyUrl of corsProxies) {
+        try {
+            const response = await fetch(proxyUrl);
+            if (!response.ok) continue;
+            const data = await response.json();
+            const quotes = data?.finance?.result?.[0]?.quotes;
+            if (quotes && quotes.length > 0) {
+                return quotes.map(q => ({
+                    symbol: q.symbol.replace('.TW', ''),
+                    name: q.shortName || q.symbol.replace('.TW', ''),
+                    market: region === 'TW' ? 'tw' : 'us'
+                }));
+            }
+        } catch (e) {
+            console.warn(`Trending API (${region}) 失敗:`, e.message);
+        }
+    }
+
+    // 嘗試直接呼叫
+    try {
+        const response = await fetch(url);
+        if (response.ok) {
+            const data = await response.json();
+            const quotes = data?.finance?.result?.[0]?.quotes;
+            if (quotes && quotes.length > 0) {
+                return quotes.map(q => ({
+                    symbol: q.symbol.replace('.TW', ''),
+                    name: q.shortName || q.symbol.replace('.TW', ''),
+                    market: region === 'TW' ? 'tw' : 'us'
+                }));
+            }
+        }
+    } catch (e) {
+        console.warn('直接呼叫也失敗');
+    }
+
+    return null; // 返回 null 表示失敗
+}
+
+// 取得掃描用的股票清單（優先即時熱門，失敗則用備用清單）
+async function getStockList(market) {
+    let list = null;
+
+    if (market === 'tw') {
+        list = await fetchTrendingTickers('TW');
+        if (!list) {
+            console.log('台股即時熱門取得失敗，使用備用清單');
+            list = STOCK_LISTS_FALLBACK.tw;
+        } else {
+            console.log(`取得台股即時熱門 ${list.length} 檔`);
+        }
+        return list.map(s => ({ ...s, market: 'tw' }));
+    } else if (market === 'us') {
+        list = await fetchTrendingTickers('US');
+        if (!list) {
+            console.log('美股即時熱門取得失敗，使用備用清單');
+            list = STOCK_LISTS_FALLBACK.us;
+        } else {
+            console.log(`取得美股即時熱門 ${list.length} 檔`);
+        }
+        return list.map(s => ({ ...s, market: 'us' }));
+    } else {
+        // 全部掃描
+        const twList = await fetchTrendingTickers('TW') || STOCK_LISTS_FALLBACK.tw;
+        const usList = await fetchTrendingTickers('US') || STOCK_LISTS_FALLBACK.us;
+        return [
+            ...twList.map(s => ({ ...s, market: 'tw' })),
+            ...usList.map(s => ({ ...s, market: 'us' }))
+        ];
+    }
+}
+
 // 篩選器狀態
 let screenerMarket = 'tw';
 let isScreening = false;
@@ -948,19 +1029,10 @@ async function startScreening() {
     screenerProgress.classList.remove('hidden');
     screenerResults.classList.add('hidden');
     progressBar.style.width = '0%';
+    progressText.textContent = '正在取得即時熱門股票...';
 
-    // 決定掃描清單
-    let stocksToScan = [];
-    if (screenerMarket === 'tw') {
-        stocksToScan = STOCK_LISTS.tw.map(s => ({ ...s, market: 'tw' }));
-    } else if (screenerMarket === 'us') {
-        stocksToScan = STOCK_LISTS.us.map(s => ({ ...s, market: 'us' }));
-    } else {
-        stocksToScan = [
-            ...STOCK_LISTS.tw.map(s => ({ ...s, market: 'tw' })),
-            ...STOCK_LISTS.us.map(s => ({ ...s, market: 'us' }))
-        ];
-    }
+    // 取得即時熱門清單
+    const stocksToScan = await getStockList(screenerMarket);
 
     const totalStocks = stocksToScan.length;
     const results = [];
