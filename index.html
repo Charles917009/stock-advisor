@@ -122,6 +122,13 @@
                         <i class="fas fa-circle-info"></i>
                         一律列出評分前 15 名。分數後帶「·」表示未達你設定的門檻，僅供比較相對強弱。
                     </p>
+                    <div class="aggregate-backtest">
+                        <button id="aggregateBacktestBtn" class="btn-aggregate-backtest">
+                            <i class="fas fa-flask-vial"></i> 對這批股票執行跨標的回測
+                        </button>
+                        <span class="aggregate-note">使用剛才已下載的資料計算，不會額外呼叫 API</span>
+                    </div>
+                    <div id="aggregateBacktestResult" class="backtest-result hidden"></div>
                 </div>
             </div>
         </section>
@@ -307,6 +314,22 @@
                 <div id="adviceContent" class="advice-content">
                     等待分析結果...
                 </div>
+            </div>
+
+            <!-- 評分回測驗證 -->
+            <div class="backtest-section">
+                <div class="backtest-header">
+                    <h3><i class="fas fa-flask-vial"></i> 評分回測驗證</h3>
+                    <button id="backtestBtn" class="btn-backtest">
+                        <i class="fas fa-play"></i> 執行回測
+                    </button>
+                </div>
+                <p class="section-note">
+                    <i class="fas fa-circle-info"></i>
+                    以這檔股票的歷史資料逐日重算評分，再比對後續 5 日與 20 日的實際報酬，檢驗評分是否真有預測力。
+                    每個時點的 52 週高低點都以當下往前推算，不使用今日數值，避免評分偷看未來資訊。
+                </p>
+                <div id="backtestResult" class="backtest-result hidden"></div>
             </div>
 
             <!-- 風險提示 -->

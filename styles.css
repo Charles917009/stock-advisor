@@ -1399,6 +1399,206 @@ body {
     font-size: 0.8rem;
 }
 
+/* ===== 評分回測 ===== */
+.backtest-section {
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 28px;
+    box-shadow: var(--shadow);
+    margin-bottom: 24px;
+}
+
+.backtest-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 16px;
+    flex-wrap: wrap;
+    margin-bottom: 14px;
+}
+
+.backtest-header h3 {
+    font-size: 1.05rem;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.backtest-header h3 i {
+    color: var(--accent-light);
+}
+
+.btn-backtest,
+.btn-aggregate-backtest {
+    padding: 9px 18px;
+    background: transparent;
+    color: var(--accent-light);
+    border: 1px solid rgba(16, 185, 129, 0.35);
+    border-radius: var(--radius-sm);
+    font-size: 0.85rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.25s ease;
+    font-family: inherit;
+    white-space: nowrap;
+}
+
+.btn-backtest:hover:not(:disabled),
+.btn-aggregate-backtest:hover:not(:disabled) {
+    background: rgba(16, 185, 129, 0.1);
+    border-color: rgba(16, 185, 129, 0.6);
+}
+
+.btn-backtest:disabled,
+.btn-aggregate-backtest:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.backtest-result {
+    margin-top: 16px;
+}
+
+.backtest-result.hidden {
+    display: none;
+}
+
+.bt-summary {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 12px;
+    margin-bottom: 18px;
+}
+
+.bt-stat {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    padding: 14px 16px;
+    background: var(--bg);
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius-sm);
+}
+
+.bt-stat-label {
+    font-size: 0.72rem;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+}
+
+.bt-stat-val {
+    font-size: 1.4rem;
+    font-weight: 700;
+    color: var(--text);
+}
+
+.bt-stat-val.bt-weak { color: var(--text-muted); }
+.bt-stat-val.bt-mid { color: #fbbf24; }
+.bt-stat-val.bt-strong { color: #34d399; }
+
+.bt-stat-note {
+    font-size: 0.72rem;
+    color: var(--text-muted);
+}
+
+.bt-table-wrap {
+    overflow-x: auto;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    margin-bottom: 16px;
+}
+
+.bt-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.84rem;
+}
+
+.bt-table thead {
+    background: var(--bg);
+}
+
+.bt-table th {
+    padding: 11px 14px;
+    text-align: left;
+    font-weight: 600;
+    color: var(--text-muted);
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+    font-size: 0.74rem;
+}
+
+.bt-table td {
+    padding: 11px 14px;
+    border-bottom: 1px solid var(--border-light);
+    color: var(--text-secondary);
+}
+
+.bt-table tbody tr:last-child td {
+    border-bottom: none;
+}
+
+.bt-table .bt-pos { color: #f87171; font-weight: 600; }
+.bt-table .bt-neg { color: #34d399; font-weight: 600; }
+
+.bt-conclusion {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 14px 16px;
+    border-radius: var(--radius-sm);
+    font-size: 0.85rem;
+    line-height: 1.7;
+    border: 1px solid var(--border-light);
+}
+
+.bt-conclusion i {
+    margin-top: 3px;
+    flex-shrink: 0;
+}
+
+.bt-conclusion.positive {
+    background: rgba(16, 185, 129, 0.06);
+    border-color: rgba(16, 185, 129, 0.2);
+    color: #6ee7b7;
+}
+
+.bt-conclusion.warning {
+    background: rgba(245, 158, 11, 0.06);
+    border-color: rgba(245, 158, 11, 0.2);
+    color: #fbbf24;
+}
+
+.bt-conclusion.negative {
+    background: rgba(239, 68, 68, 0.06);
+    border-color: rgba(239, 68, 68, 0.2);
+    color: #f87171;
+}
+
+.bt-note {
+    margin-top: 10px;
+    font-size: 0.76rem;
+    color: var(--text-muted);
+}
+
+.aggregate-backtest {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-top: 16px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border-light);
+}
+
+.aggregate-note {
+    font-size: 0.74rem;
+    color: var(--text-muted);
+}
+
 /* ===== 價格走勢圖 ===== */
 .chart-section {
     background: var(--card-bg);

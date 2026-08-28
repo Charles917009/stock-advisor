@@ -485,9 +485,11 @@ function fetchStockData(symbol, market) {
 async function fetchStockDataUncached(symbol, market) {
     const tickerSymbol = market === 'tw' ? `${symbol}.TW` : symbol;
 
-    // 使用 Yahoo Finance Chart API 獲取歷史數據
+    // 使用 Yahoo Finance Chart API 獲取歷史數據。
+    // 取兩年是為了讓回測有足夠樣本：扣掉 60 天暖身與 20 天前瞻窗口後，
+    // 兩年約可得到 400 個以上的觀察點，180 天只剩約 100 個。
     const endDate = Math.floor(Date.now() / 1000);
-    const startDate = endDate - (180 * 24 * 60 * 60); // 180 天
+    const startDate = endDate - (730 * 24 * 60 * 60); // 兩年
 
     const yahooUrls = [
         `https://query1.finance.yahoo.com/v8/finance/chart/${tickerSymbol}?period1=${startDate}&period2=${endDate}&interval=1d`,
@@ -947,6 +949,344 @@ function performAnalysis(stockData) {
         fundData: positionData, // 相容舊欄位名稱
         signals
     };
+}
+
+// ===== 評分回測 =====
+
+const BACKTEST_WARMUP = 60;      // 均線與指標需要的暖身天數
+const BACKTEST_HORIZONS = [5, 20]; // 前瞻報酬觀察期（交易日）
+
+/**
+ * 依歷史資料逐日重算評分，並比對後續報酬，用來檢驗評分是否真有預測力。
+ *
+ * 避免前瞻偏誤（lookahead bias）的關鍵：
+ * performAnalysis 會用到 52 週高低點，而 stockData.fiftyTwoWeekHigh/Low 是「今天」的值。
+ * 若直接沿用，等於讓過去的評分偷看到未來的價格區間，回測結果會嚴重失真。
+ * 因此這裡在每個時點都只用當下往前 252 個交易日重新計算高低點。
+ *
+ * @returns {{samples: number, horizons: Object, buckets: Array, strategySplit: Object}|null}
+ */
+function computeBacktest(stockData) {
+    const prices = stockData.prices;
+    const maxHorizon = Math.max(...BACKTEST_HORIZONS);
+
+    if (!prices || prices.length < BACKTEST_WARMUP + maxHorizon + 10) {
+        return null;
+    }
+
+    const observations = [];
+
+    for (let t = BACKTEST_WARMUP; t < prices.length - maxHorizon; t++) {
+        const history = prices.slice(0, t + 1);
+
+        // 以當下時點重算 52 週高低點，不使用現在的 meta 值
+        const yearWindow = history.slice(-252);
+        let high = -Infinity;
+        let low = Infinity;
+        for (const p of yearWindow) {
+            if (p.high > high) high = p.high;
+            if (p.low < low) low = p.low;
+        }
+
+        const pointInTime = {
+            symbol: stockData.symbol,
+            name: stockData.name,
+            market: stockData.market,
+            currency: stockData.currency,
+            currentPrice: prices[t].close,
+            previousClose: prices[t - 1].close,
+            prices: history,
+            fiftyTwoWeekHigh: high,
+            fiftyTwoWeekLow: low
+        };
+
+        let analysis;
+        try {
+            analysis = performAnalysis(pointInTime);
+        } catch {
+            continue;
+        }
+
+        const forward = {};
+        for (const h of BACKTEST_HORIZONS) {
+            const future = prices[t + h];
+            forward[h] = future && prices[t].close > 0
+                ? (future.close / prices[t].close - 1) * 100
+                : null;
+        }
+
+        observations.push({
+            score: analysis.totalScore,
+            strategy: analysis.strategy,
+            forward
+        });
+    }
+
+    if (observations.length < 30) return null;
+
+    // 依分數分組，觀察各組後續平均報酬
+    const bucketDefs = [
+        { label: '< 40', min: -Infinity, max: 40 },
+        { label: '40–54', min: 40, max: 55 },
+        { label: '55–69', min: 55, max: 70 },
+        { label: '70–79', min: 70, max: 80 },
+        { label: '≥ 80', min: 80, max: Infinity }
+    ];
+
+    const buckets = bucketDefs.map(def => {
+        const inBucket = observations.filter(o => o.score >= def.min && o.score < def.max);
+        const row = { label: def.label, count: inBucket.length, returns: {} };
+        for (const h of BACKTEST_HORIZONS) {
+            const vals = inBucket.map(o => o.forward[h]).filter(v => v !== null);
+            row.returns[h] = vals.length > 0
+                ? vals.reduce((s, v) => s + v, 0) / vals.length
+                : null;
+            row.winRate = row.winRate || {};
+            row.winRate[h] = vals.length > 0
+                ? (vals.filter(v => v > 0).length / vals.length) * 100
+                : null;
+        }
+        return row;
+    }).filter(b => b.count > 0);
+
+    // 分數與前瞻報酬的相關係數（Pearson）
+    const horizons = {};
+    for (const h of BACKTEST_HORIZONS) {
+        const pairs = observations
+            .filter(o => o.forward[h] !== null)
+            .map(o => [o.score, o.forward[h]]);
+
+        horizons[h] = {
+            samples: pairs.length,
+            correlation: pearson(pairs.map(p => p[0]), pairs.map(p => p[1])),
+            avgReturn: pairs.length > 0
+                ? pairs.reduce((s, p) => s + p[1], 0) / pairs.length
+                : null
+        };
+    }
+
+    const strategySplit = {
+        trend: observations.filter(o => o.strategy === 'trend').length,
+        revert: observations.filter(o => o.strategy === 'revert').length
+    };
+
+    return { samples: observations.length, horizons, buckets, strategySplit };
+}
+
+// Pearson 相關係數
+function pearson(xs, ys) {
+    const n = xs.length;
+    if (n < 3) return null;
+    const mx = xs.reduce((s, v) => s + v, 0) / n;
+    const my = ys.reduce((s, v) => s + v, 0) / n;
+    let num = 0, dx = 0, dy = 0;
+    for (let i = 0; i < n; i++) {
+        const a = xs[i] - mx, b = ys[i] - my;
+        num += a * b;
+        dx += a * a;
+        dy += b * b;
+    }
+    const den = Math.sqrt(dx * dy);
+    return den === 0 ? null : num / den;
+}
+
+/**
+ * 合併多檔股票的回測結果。
+ * 單一標的樣本數不足以下結論，跨標的彙總才有參考價值。
+ */
+function mergeBacktests(results) {
+    const valid = results.filter(Boolean);
+    if (valid.length === 0) return null;
+
+    const merged = {
+        symbols: valid.length,
+        samples: valid.reduce((s, r) => s + r.samples, 0),
+        horizons: {},
+        buckets: [],
+        strategySplit: { trend: 0, revert: 0 }
+    };
+
+    valid.forEach(r => {
+        merged.strategySplit.trend += r.strategySplit.trend;
+        merged.strategySplit.revert += r.strategySplit.revert;
+    });
+
+    // 以樣本數加權平均各期間的相關係數與報酬
+    for (const h of BACKTEST_HORIZONS) {
+        let wSum = 0, corrSum = 0, retSum = 0, n = 0;
+        valid.forEach(r => {
+            const hz = r.horizons[h];
+            if (!hz || hz.correlation === null) return;
+            wSum += hz.samples;
+            corrSum += hz.correlation * hz.samples;
+            retSum += (hz.avgReturn ?? 0) * hz.samples;
+            n += hz.samples;
+        });
+        merged.horizons[h] = {
+            samples: n,
+            correlation: wSum > 0 ? corrSum / wSum : null,
+            avgReturn: wSum > 0 ? retSum / wSum : null
+        };
+    }
+
+    // 依 label 合併各分數區間
+    const byLabel = new Map();
+    valid.forEach(r => {
+        r.buckets.forEach(b => {
+            if (!byLabel.has(b.label)) {
+                byLabel.set(b.label, { label: b.label, count: 0, sums: {}, wins: {}, ns: {} });
+            }
+            const agg = byLabel.get(b.label);
+            agg.count += b.count;
+            for (const h of BACKTEST_HORIZONS) {
+                if (b.returns[h] === null) continue;
+                agg.sums[h] = (agg.sums[h] || 0) + b.returns[h] * b.count;
+                agg.wins[h] = (agg.wins[h] || 0) + (b.winRate[h] ?? 0) * b.count;
+                agg.ns[h] = (agg.ns[h] || 0) + b.count;
+            }
+        });
+    });
+
+    const order = ['< 40', '40–54', '55–69', '70–79', '≥ 80'];
+    merged.buckets = order
+        .filter(l => byLabel.has(l))
+        .map(l => {
+            const agg = byLabel.get(l);
+            const row = { label: l, count: agg.count, returns: {}, winRate: {} };
+            for (const h of BACKTEST_HORIZONS) {
+                row.returns[h] = agg.ns[h] ? agg.sums[h] / agg.ns[h] : null;
+                row.winRate[h] = agg.ns[h] ? agg.wins[h] / agg.ns[h] : null;
+            }
+            return row;
+        });
+
+    return merged;
+}
+
+// 呈現回測結果
+function renderBacktestResult(result, { scope = '單一標的', targetId = 'backtestResult' } = {}) {
+    const el = document.getElementById(targetId);
+    if (!el) return;
+
+    el.classList.remove('hidden');
+
+    if (!result) {
+        el.innerHTML = `<p class="news-placeholder">歷史資料不足，無法進行回測（至少需要約 90 個交易日）。</p>`;
+        return;
+    }
+
+    const fmtPct = v => v === null || v === undefined
+        ? '—'
+        : `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`;
+    const cls = v => v === null || v === undefined ? '' : (v >= 0 ? 'bt-pos' : 'bt-neg');
+
+    // 相關係數摘要
+    let head = '<div class="bt-summary">';
+    head += `<div class="bt-stat"><span class="bt-stat-label">觀察樣本</span>`
+        + `<span class="bt-stat-val">${result.samples.toLocaleString()}</span>`
+        + `<span class="bt-stat-note">${escapeHtml(scope)}${result.symbols ? `・${result.symbols} 檔` : ''}</span></div>`;
+
+    BACKTEST_HORIZONS.forEach(h => {
+        const hz = result.horizons[h];
+        const corr = hz?.correlation;
+        let verdict = '無資料';
+        let vClass = '';
+        if (corr !== null && corr !== undefined) {
+            const a = Math.abs(corr);
+            if (a < 0.05) { verdict = '幾乎無關聯'; vClass = 'bt-weak'; }
+            else if (a < 0.15) { verdict = '極弱關聯'; vClass = 'bt-weak'; }
+            else if (a < 0.3) { verdict = '弱關聯'; vClass = 'bt-mid'; }
+            else { verdict = '中度以上關聯'; vClass = 'bt-strong'; }
+            if (corr < 0) verdict += '（反向）';
+        }
+        head += `<div class="bt-stat"><span class="bt-stat-label">${h} 日相關係數</span>`
+            + `<span class="bt-stat-val ${vClass}">${corr === null || corr === undefined ? '—' : corr.toFixed(3)}</span>`
+            + `<span class="bt-stat-note">${verdict}</span></div>`;
+    });
+    head += '</div>';
+
+    // 分數區間對照表
+    let table = `<div class="bt-table-wrap"><table class="bt-table">
+        <thead><tr>
+            <th>評分區間</th><th>樣本數</th>
+            ${BACKTEST_HORIZONS.map(h => `<th>${h} 日平均報酬</th><th>${h} 日勝率</th>`).join('')}
+        </tr></thead><tbody>`;
+
+    result.buckets.forEach(b => {
+        table += `<tr>
+            <td><strong>${escapeHtml(b.label)}</strong></td>
+            <td>${b.count.toLocaleString()}</td>
+            ${BACKTEST_HORIZONS.map(h => `
+                <td class="${cls(b.returns[h])}">${fmtPct(b.returns[h])}</td>
+                <td>${b.winRate[h] === null || b.winRate[h] === undefined ? '—' : b.winRate[h].toFixed(0) + '%'}</td>
+            `).join('')}
+        </tr>`;
+    });
+    table += '</tbody></table></div>';
+
+    // 誠實結論：相關係數很低就直說
+    const corr20 = result.horizons[20]?.correlation;
+    let conclusion = '';
+    if (corr20 !== null && corr20 !== undefined) {
+        const a = Math.abs(corr20);
+        if (a < 0.1) {
+            conclusion = `<div class="bt-conclusion warning">
+                <i class="fas fa-triangle-exclamation"></i>
+                20 日相關係數僅 ${corr20.toFixed(3)}，代表評分與後續報酬幾乎沒有線性關聯。
+                這個評分適合用來描述目前的技術狀態，不適合當作報酬預測工具，請勿單憑分數決定進出。
+            </div>`;
+        } else if (corr20 > 0) {
+            conclusion = `<div class="bt-conclusion positive">
+                <i class="fas fa-circle-check"></i>
+                20 日相關係數 ${corr20.toFixed(3)}，高分組後續報酬確實略優，但單一標的樣本有限，
+                建議在篩選頁執行跨標的回測取得更可靠的結論。
+            </div>`;
+        } else {
+            conclusion = `<div class="bt-conclusion negative">
+                <i class="fas fa-circle-xmark"></i>
+                20 日相關係數 ${corr20.toFixed(3)} 為負值，代表高分反而對應較差的後續報酬。
+                這組權重在此標的上並不成立，不應據此進場。
+            </div>`;
+        }
+    }
+
+    const split = result.strategySplit;
+    const splitNote = split
+        ? `<p class="bt-note">歷史時點策略分布：順勢 ${split.trend} 次、逆勢 ${split.revert} 次。</p>`
+        : '';
+
+    el.innerHTML = head + table + conclusion + splitNote;
+}
+
+// 回測按鈕
+const backtestBtn = document.getElementById('backtestBtn');
+if (backtestBtn) {
+    backtestBtn.addEventListener('click', () => {
+        const stockData = chartState.stockData;
+        if (!stockData) {
+            showToast('請先分析一檔股票，再執行回測。', 'warning', 4000);
+            return;
+        }
+
+        backtestBtn.disabled = true;
+        backtestBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 計算中...';
+
+        // 計算量較大，讓瀏覽器先更新按鈕狀態再開始
+        setTimeout(() => {
+            try {
+                const result = computeBacktest(stockData);
+                renderBacktestResult(result, { scope: stockData.symbol });
+                document.getElementById('backtestResult')
+                    .scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            } catch (err) {
+                console.error('回測失敗:', err);
+                showToast(`回測失敗：${err.message}`, 'error', 6000);
+            } finally {
+                backtestBtn.disabled = false;
+                backtestBtn.innerHTML = '<i class="fas fa-play"></i> 執行回測';
+            }
+        }, 30);
+    });
 }
 
 // ===== 價格走勢圖（原生 canvas，不依賴外部繪圖庫）=====
@@ -1926,6 +2266,7 @@ async function getStockList(market) {
 let screenerMarket = 'tw';
 let isScreening = false;
 let screenerAborted = false;
+let lastScannedStocks = [];
 
 // 篩選器 DOM 元素
 const screenerBtn = document.getElementById('screenerBtn');
@@ -1981,6 +2322,8 @@ async function startScreening() {
 
     // 取得即時熱門清單
     const stocksToScan = await getStockList(screenerMarket);
+    // 記下這批標的，供之後的跨標的回測直接取用快取資料
+    lastScannedStocks = stocksToScan;
 
     const totalStocks = stocksToScan.length;
     const results = [];
@@ -2117,6 +2460,54 @@ function displayScreenerResults(results, { minScore = 60, aborted = false, faile
     });
 
     screenerTableBody.innerHTML = html;
+}
+
+// 跨標的回測：直接使用篩選時已下載並快取的資料，不再呼叫 API
+const aggregateBacktestBtn = document.getElementById('aggregateBacktestBtn');
+if (aggregateBacktestBtn) {
+    aggregateBacktestBtn.addEventListener('click', async () => {
+        if (lastScannedStocks.length === 0) {
+            showToast('請先執行一次篩選，再進行跨標的回測。', 'warning', 4000);
+            return;
+        }
+
+        aggregateBacktestBtn.disabled = true;
+        aggregateBacktestBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 計算中...';
+
+        const resultEl = document.getElementById('aggregateBacktestResult');
+        const perStock = [];
+        let missing = 0;
+
+        try {
+            for (const stock of lastScannedStocks) {
+                // 只讀快取，沒有就跳過，確保不產生新的網路請求
+                const sd = cacheGet(`stock:${stock.market}:${stock.symbol}`);
+                if (!sd) { missing++; continue; }
+
+                perStock.push(computeBacktest(sd));
+
+                // 讓出主執行緒，避免長時間運算凍結畫面
+                await new Promise(r => setTimeout(r, 0));
+            }
+
+            const merged = mergeBacktests(perStock);
+            renderBacktestResult(merged, {
+                scope: '跨標的彙總',
+                targetId: 'aggregateBacktestResult'
+            });
+            resultEl?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+
+            if (missing > 0) {
+                showToast(`有 ${missing} 檔的資料已過期或未取得，本次回測未納入。`, 'info', 5000);
+            }
+        } catch (err) {
+            console.error('跨標的回測失敗:', err);
+            showToast(`跨標的回測失敗：${err.message}`, 'error', 6000);
+        } finally {
+            aggregateBacktestBtn.disabled = false;
+            aggregateBacktestBtn.innerHTML = '<i class="fas fa-flask-vial"></i> 對這批股票執行跨標的回測';
+        }
+    });
 }
 
 // 「詳細」按鈕採事件委派，取代 inline onclick：
