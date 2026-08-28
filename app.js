@@ -69,41 +69,63 @@ async function fetchStockData(symbol, market) {
     const endDate = Math.floor(Date.now() / 1000);
     const startDate = endDate - (180 * 24 * 60 * 60); // 180 天
 
-    const yahooUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${tickerSymbol}?period1=${startDate}&period2=${endDate}&interval=1d`;
-
-    // 使用多個 CORS proxy 備援
-    const corsProxies = [
-        `https://api.allorigins.win/raw?url=${encodeURIComponent(yahooUrl)}`,
-        `https://corsproxy.io/?${encodeURIComponent(yahooUrl)}`,
-        `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(yahooUrl)}`
+    // 嘗試多個 Yahoo Finance endpoint
+    const yahooUrls = [
+        `https://query1.finance.yahoo.com/v8/finance/chart/${tickerSymbol}?period1=${startDate}&period2=${endDate}&interval=1d`,
+        `https://query2.finance.yahoo.com/v8/finance/chart/${tickerSymbol}?period1=${startDate}&period2=${endDate}&interval=1d`
     ];
 
-    let response = null;
+    // CORS proxy 服務列表
+    const proxyTemplates = [
+        (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+        (url) => `https://corsproxy.io/?url=${encodeURIComponent(url)}`,
+        (url) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
+        (url) => `https://proxy.cors.sh/${url}`
+    ];
+
     let data = null;
 
-    for (const proxyUrl of corsProxies) {
-        try {
-            response = await fetch(proxyUrl);
-            if (response.ok) {
-                data = await response.json();
+    // 逐一嘗試每個 proxy + 每個 endpoint 的組合
+    for (const yahooUrl of yahooUrls) {
+        for (const makeProxy of proxyTemplates) {
+            const proxyUrl = makeProxy(yahooUrl);
+            try {
+                const response = await fetch(proxyUrl, {
+                    headers: {
+                        'Accept': 'application/json',
+                        'x-cors-api-key': 'temp_' // 某些 proxy 需要
+                    }
+                });
+                if (!response.ok) continue;
+
+                const text = await response.text();
+                try {
+                    data = JSON.parse(text);
+                } catch {
+                    continue;
+                }
+
                 if (data.chart && data.chart.result) break;
+                data = null;
+            } catch (e) {
+                continue;
             }
-        } catch (e) {
-            console.warn('Proxy 失敗，嘗試下一個:', e.message);
-            continue;
         }
-        data = null;
+        if (data) break;
     }
 
-    // 最後嘗試直接呼叫（本機環境可能成功）
+    // 最後嘗試直接呼叫（本機 / Live Server 環境可能成功）
     if (!data) {
-        try {
-            response = await fetch(yahooUrl);
-            if (response.ok) {
-                data = await response.json();
+        for (const yahooUrl of yahooUrls) {
+            try {
+                const response = await fetch(yahooUrl);
+                if (response.ok) {
+                    data = await response.json();
+                    if (data.chart && data.chart.result) break;
+                }
+            } catch (e) {
+                continue;
             }
-        } catch (e) {
-            console.warn('直接呼叫也失敗:', e.message);
         }
     }
 
