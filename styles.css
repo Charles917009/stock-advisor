@@ -261,6 +261,140 @@ body {
 .proxy-status.saved { color: #34d399; }
 .proxy-status.error { color: #f87171; }
 
+/* 基本面區塊 */
+.fundamental-section.hidden {
+    display: none;
+}
+
+.fund-section-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: 16px;
+}
+
+.fund-section-head h3 {
+    font-size: 1.05rem;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 0;
+}
+
+.fund-section-head h3 i {
+    color: var(--accent-light);
+}
+
+.fund-source-badge {
+    font-size: 0.72rem;
+    color: var(--text-muted);
+    padding: 4px 12px;
+    background: var(--bg);
+    border: 1px solid var(--border-light);
+    border-radius: 20px;
+}
+
+.fund-score-bar-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 18px;
+}
+
+.fund-score-label {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    white-space: nowrap;
+}
+
+/* 基本面金鑰面板 */
+.fundamental-keys {
+    margin-bottom: 16px;
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius-sm);
+    background: var(--bg);
+    padding: 4px 14px;
+}
+
+.fundamental-keys summary {
+    cursor: pointer;
+    font-size: 0.82rem;
+    font-weight: 500;
+    color: var(--text-secondary);
+    padding: 8px 0;
+    list-style-position: inside;
+}
+
+.fundamental-keys summary i {
+    color: var(--accent-light);
+    margin-right: 6px;
+}
+
+.fund-key-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 0;
+    flex-wrap: wrap;
+}
+
+.fund-key-row label {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    white-space: nowrap;
+    min-width: 130px;
+}
+
+.fund-key-row input {
+    flex: 1;
+    min-width: 180px;
+    padding: 8px 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-xs);
+    background: var(--card-bg);
+    color: var(--text);
+    font-size: 0.8rem;
+    font-family: inherit;
+    outline: none;
+    transition: border-color 0.25s;
+}
+
+.fund-key-row input:focus {
+    border-color: var(--accent);
+}
+
+.btn-save-key-sm {
+    padding: 7px 14px;
+    background: var(--accent);
+    color: white;
+    border: none;
+    border-radius: var(--radius-xs);
+    font-size: 0.76rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.25s;
+    font-family: inherit;
+}
+
+.btn-save-key-sm:hover {
+    background: #059669;
+}
+
+.fund-key-note {
+    font-size: 0.74rem;
+    color: var(--text-muted);
+    line-height: 1.6;
+    padding: 8px 0 4px;
+}
+
+.fund-key-note i {
+    color: var(--accent-light);
+    margin-right: 5px;
+}
+
 .quick-picks {
     display: flex;
     align-items: center;

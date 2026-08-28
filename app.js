@@ -71,6 +71,42 @@ saveProxyBtn.addEventListener('click', () => {
     }
 });
 
+// ===== 基本面金鑰 UI =====
+// 通用的金鑰輸入綁定：載入已存值 + 儲存/清除，並在變動時清掉相關快取
+function bindKeyInput(inputId, btnId, statusId, storageKey, cachePrefix) {
+    const input = document.getElementById(inputId);
+    const btn = document.getElementById(btnId);
+    const status = document.getElementById(statusId);
+    if (!input || !btn || !status) return;
+
+    const saved = localStorage.getItem(storageKey);
+    if (saved) {
+        input.value = saved;
+        status.textContent = '✓ 已設定';
+        status.className = 'key-status saved';
+    }
+
+    btn.addEventListener('click', () => {
+        const val = input.value.trim();
+        if (val) {
+            localStorage.setItem(storageKey, val);
+            status.textContent = '✓ 已設定';
+            status.className = 'key-status saved';
+        } else {
+            localStorage.removeItem(storageKey);
+            status.textContent = '已清除';
+            status.className = 'key-status error';
+        }
+        // 金鑰變動 → 清掉對應快取，下次重抓
+        for (const k of [...cacheStore.keys()]) {
+            if (k.startsWith(cachePrefix)) cacheStore.delete(k);
+        }
+    });
+}
+
+bindKeyInput('finmindInput', 'saveFinmindBtn', 'finmindStatus', 'finmind_token', 'fundamental:tw');
+bindKeyInput('fmpInput', 'saveFmpBtn', 'fmpStatus', 'fmp_key', 'fundamental:us');
+
 // ===== 主分析函數 =====
 async function analyzeStock() {
     const symbol = stockInput.value.trim().toUpperCase();
@@ -85,7 +121,17 @@ async function analyzeStock() {
     try {
         // 使用 Yahoo Finance API 獲取數據
         const stockData = await fetchStockData(symbol, currentMarket);
-        const analysis = performAnalysis(stockData);
+
+        // 基本面為選填：抓取失敗不應中斷技術分析（台股 FinMind 可匿名，
+        // 美股需 FMP 金鑰，無金鑰時會回 null）
+        let fundamentals = null;
+        try {
+            fundamentals = await fetchFundamentals(symbol, currentMarket);
+        } catch (e) {
+            console.warn('基本面取得失敗，僅用技術面:', e.message);
+        }
+
+        const analysis = performAnalysis(stockData, fundamentals);
         displayResults(stockData, analysis);
     } catch (error) {
         console.error('分析錯誤:', error);
@@ -357,7 +403,8 @@ const CACHE_TTL = {
     stock: 5 * 60 * 1000,   // 股價 5 分鐘
     news: 15 * 60 * 1000,   // 新聞 15 分鐘
     ai: 30 * 60 * 1000,     // AI 研判 30 分鐘
-    trending: 10 * 60 * 1000 // 熱門排行 10 分鐘
+    trending: 10 * 60 * 1000, // 熱門排行 10 分鐘
+    fundamental: 6 * 60 * 60 * 1000 // 基本面 6 小時（財報數據一天內幾乎不變）
 };
 
 function cacheGet(key) {
@@ -471,6 +518,143 @@ async function fetchJsonViaProxy(targetUrl) {
         }
     }
 
+    return null;
+}
+
+/**
+ * 只透過使用者自訂 Worker 取得 JSON（不使用公共 proxy）。
+ * 用於帶 API Key 的請求，避免金鑰經過第三方公共代理外洩。
+ */
+async function fetchJsonViaOwnProxy(targetUrl) {
+    const customProxy = getCustomProxy();
+    if (!customProxy) {
+        // 本機直接呼叫（Live Server 情境），線上一定要有自己的 Worker
+        try {
+            const r = await fetch(targetUrl);
+            return r.ok ? r.json() : null;
+        } catch {
+            return null;
+        }
+    }
+    try {
+        const r = await fetch(`${customProxy}/?url=${encodeURIComponent(targetUrl)}`);
+        return r.ok ? r.json() : null;
+    } catch {
+        return null;
+    }
+}
+
+// ===== 基本面資料（FinMind 台股 / FMP 美股）=====
+
+function getFinmindToken() {
+    return (localStorage.getItem('finmind_token') || '').trim();
+}
+function getFmpKey() {
+    return (localStorage.getItem('fmp_key') || '').trim();
+}
+
+// 對外入口：帶快取
+function fetchFundamentals(symbol, market) {
+    return cached(`fundamental:${market}:${symbol}`, CACHE_TTL.fundamental,
+        () => fetchFundamentalsUncached(symbol, market));
+}
+
+async function fetchFundamentalsUncached(symbol, market) {
+    return market === 'tw'
+        ? fetchFinmindFundamentals(symbol)
+        : fetchFmpFundamentals(symbol);
+}
+
+// 台股：FinMind
+async function fetchFinmindFundamentals(symbol) {
+    const token = getFinmindToken();
+    const today = new Date();
+    const fmt = d => d.toISOString().slice(0, 10);
+    const tokenParam = token ? `&token=${encodeURIComponent(token)}` : '';
+
+    const result = {
+        source: 'FinMind',
+        per: null, pbr: null, dividendYield: null,
+        revenueYoY: null, revenueMonth: null
+    };
+
+    // 本益比 / 股價淨值比 / 殖利率（取近 30 天最新一筆）
+    const perStart = fmt(new Date(today.getTime() - 30 * 86400000));
+    const perUrl = `https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockPER&data_id=${symbol}&start_date=${perStart}&end_date=${fmt(today)}${tokenParam}`;
+    const perData = await fetchJsonViaOwnProxy(perUrl);
+    if (perData?.status === 200 && perData.data?.length > 0) {
+        const latest = perData.data[perData.data.length - 1];
+        result.per = latest.PER ?? null;
+        result.pbr = latest.PBR ?? null;
+        result.dividendYield = latest.dividend_yield ?? null;
+    }
+
+    // 月營收年增率（比對去年同月）
+    const revStart = fmt(new Date(today.getTime() - 400 * 86400000));
+    const revUrl = `https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockMonthRevenue&data_id=${symbol}&start_date=${revStart}&end_date=${fmt(today)}${tokenParam}`;
+    const revData = await fetchJsonViaOwnProxy(revUrl);
+    if (revData?.status === 200 && revData.data?.length > 0) {
+        const rows = revData.data;
+        const latest = rows[rows.length - 1];
+        result.revenueMonth = `${latest.revenue_year}/${String(latest.revenue_month).padStart(2, '0')}`;
+        // 找去年同月
+        const prevYear = rows.find(r =>
+            r.revenue_month === latest.revenue_month &&
+            r.revenue_year === latest.revenue_year - 1);
+        if (prevYear && prevYear.revenue > 0) {
+            result.revenueYoY = (latest.revenue / prevYear.revenue - 1) * 100;
+        }
+    }
+
+    // 全部抓不到就回 null，讓上層知道沒有基本面
+    const hasAny = result.per !== null || result.dividendYield !== null || result.revenueYoY !== null;
+    return hasAny ? result : null;
+}
+
+// 美股：FMP（需 API Key）
+async function fetchFmpFundamentals(symbol) {
+    const key = getFmpKey();
+    if (!key) return null; // FMP 一定要 key
+
+    const result = {
+        source: 'FMP',
+        per: null, pbr: null, dividendYield: null,
+        eps: null, marketCap: null
+    };
+
+    // quote：PE、EPS、市值
+    const quoteUrl = `https://financialmodelingprep.com/stable/quote?symbol=${encodeURIComponent(symbol)}&apikey=${encodeURIComponent(key)}`;
+    const quote = await fetchJsonViaOwnProxy(quoteUrl);
+    const q = Array.isArray(quote) ? quote[0] : quote;
+    if (q) {
+        result.per = pickNumber(q, ['pe', 'peRatio', 'priceEarningsRatio']);
+        result.eps = pickNumber(q, ['eps', 'epsTTM']);
+        result.marketCap = pickNumber(q, ['marketCap', 'marketCapitalization']);
+    }
+
+    // ratios-ttm：殖利率、股價淨值比
+    const ratioUrl = `https://financialmodelingprep.com/stable/ratios-ttm?symbol=${encodeURIComponent(symbol)}&apikey=${encodeURIComponent(key)}`;
+    const ratios = await fetchJsonViaOwnProxy(ratioUrl);
+    const r = Array.isArray(ratios) ? ratios[0] : ratios;
+    if (r) {
+        let dy = pickNumber(r, ['dividendYieldTTM', 'dividendYielPercentageTTM', 'dividendYieldPercentageTTM']);
+        // FMP 的殖利率有時是比例(0.005)有時是百分比(0.5)，統一成百分比
+        if (dy !== null && dy < 1) dy *= 100;
+        result.dividendYield = dy;
+        result.pbr = pickNumber(r, ['priceToBookRatioTTM', 'pbRatioTTM', 'priceBookValueRatioTTM']);
+    }
+
+    const hasAny = result.per !== null || result.dividendYield !== null || result.pbr !== null;
+    return hasAny ? result : null;
+}
+
+// 從物件中依序嘗試多個可能的欄位名稱，回傳第一個有效數值
+function pickNumber(obj, keys) {
+    for (const k of keys) {
+        const v = obj[k];
+        if (typeof v === 'number' && Number.isFinite(v)) return v;
+        if (typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v))) return Number(v);
+    }
     return null;
 }
 
@@ -707,7 +891,65 @@ function scaleDeviation(deviation, fullScale, inverse = false) {
  *   順勢評分 = 趨勢主導；逆勢評分 = 位階主導
  * 總分取兩者較高者，並標明適用哪一種策略，訊號因此不再互相抵銷。
  */
-function performAnalysis(stockData) {
+/**
+ * 由基本面資料算出 0~100 分（高分＝估值合理且體質健康）。
+ * 各項分數的門檻是通用粗估，不分產業，成長股的高本益比會被扣分 —
+ * 這是簡化下的取捨，UI 會提醒使用者本益比合理範圍因產業而異。
+ * @returns {{score:number, signals:Array}|null} 無資料回 null
+ */
+function computeFundamentalScore(f) {
+    if (!f) return null;
+
+    const parts = [];   // { score, weight }
+    const signals = [];
+
+    // 本益比：低於 12 視為便宜，高於則遞減；虧損（<=0）給偏低分
+    if (typeof f.per === 'number') {
+        let perScore;
+        if (f.per <= 0) {
+            perScore = 35;
+            signals.push({ text: `本益比為負（${f.per.toFixed(1)}），公司可能虧損`, type: 'negative' });
+        } else {
+            perScore = clamp(100 - (f.per - 12) * 3);
+            if (f.per <= 15) signals.push({ text: `本益比 ${f.per.toFixed(1)}，估值相對合理`, type: 'positive' });
+            else if (f.per >= 30) signals.push({ text: `本益比 ${f.per.toFixed(1)} 偏高，須有成長支撐`, type: 'negative' });
+        }
+        parts.push({ score: perScore, weight: f.source === 'FinMind' ? 0.40 : 0.45 });
+    }
+
+    // 殖利率：越高越好，5% 以上接近滿分
+    if (typeof f.dividendYield === 'number') {
+        const dyScore = clamp(40 + f.dividendYield * 10);
+        parts.push({ score: dyScore, weight: 0.25 });
+        if (f.dividendYield >= 4) signals.push({ text: `殖利率 ${f.dividendYield.toFixed(2)}%，配息吸引`, type: 'positive' });
+    }
+
+    // 台股：月營收年增率
+    if (typeof f.revenueYoY === 'number') {
+        const revScore = clamp(50 + f.revenueYoY * 1.2);
+        parts.push({ score: revScore, weight: 0.35 });
+        signals.push({
+            text: `最新月營收年增 ${f.revenueYoY >= 0 ? '+' : ''}${f.revenueYoY.toFixed(1)}%`,
+            type: f.revenueYoY >= 0 ? 'positive' : 'negative'
+        });
+    }
+
+    // 美股：股價淨值比（越低越便宜）
+    if (typeof f.pbr === 'number') {
+        const pbrScore = clamp(100 - (f.pbr - 1.5) * 15);
+        parts.push({ score: pbrScore, weight: 0.30 });
+    }
+
+    if (parts.length === 0) return null;
+
+    // 依實際存在的項目重新分配權重
+    const totalWeight = parts.reduce((s, p) => s + p.weight, 0);
+    const score = clamp(parts.reduce((s, p) => s + p.score * p.weight, 0) / totalWeight);
+
+    return { score: Math.round(score), signals };
+}
+
+function performAnalysis(stockData, fundamentals = null) {
     const { prices, currentPrice } = stockData;
 
     // ---- 技術指標 ----
@@ -907,7 +1149,7 @@ function performAnalysis(stockData) {
     }
 
     const useTrendFollow = trendFollowScore >= meanRevertScore;
-    const totalScore = Math.round(useTrendFollow ? trendFollowScore : meanRevertScore);
+    const technicalScore = Math.round(useTrendFollow ? trendFollowScore : meanRevertScore);
     const strategy = useTrendFollow ? 'trend' : 'revert';
 
     signals.push({
@@ -916,6 +1158,16 @@ function performAnalysis(stockData) {
             : '訊號組合偏向逆勢操作：等待落底訊號確認後分批承接',
         type: 'neutral'
     });
+
+    // ================= 基本面（選填）=================
+    // 基本面與技術面是互補資訊而非互斥策略，因此用加權混入（20%），
+    // 而非像順勢/逆勢取 max。沒有基本面資料時完全不影響總分。
+    const fundamentalResult = computeFundamentalScore(fundamentals);
+    let totalScore = technicalScore;
+    if (fundamentalResult) {
+        totalScore = Math.round(technicalScore * 0.8 + fundamentalResult.score * 0.2);
+        fundamentalResult.signals.forEach(s => signals.push(s));
+    }
 
     return {
         // 三個獨立面向
@@ -926,9 +1178,14 @@ function performAnalysis(stockData) {
         // 兩種策略與總分
         trendFollowScore: Math.round(trendFollowScore),
         meanRevertScore: Math.round(meanRevertScore),
+        technicalScore,
         totalScore,
         strategy,
         strategyLabel: useTrendFollow ? '順勢' : '逆勢',
+
+        // 基本面（無資料時為 null）
+        fundamentalScore: fundamentalResult ? fundamentalResult.score : null,
+        fundamentals: fundamentals || null,
 
         // 相容舊欄位名稱（篩選器與 AI prompt 仍在使用）
         techScore: Math.round(momentumScore),
@@ -1620,6 +1877,9 @@ function displayResults(stockData, analysis) {
     // 技術指標
     displayIndicators(stockData, analysis);
 
+    // 基本面（財報數據，有資料才顯示）
+    displayFundamentalSection(stockData, analysis);
+
     // 價格位階與風險
     displayPositionMetrics(stockData, analysis);
 
@@ -1864,6 +2124,71 @@ function displayIndicators(stockData, analysis) {
     }
 }
 
+// 顯示基本面（真實財報數據）。無資料時隱藏整個區塊。
+function displayFundamentalSection(stockData, analysis) {
+    const section = document.getElementById('fundamentalSection');
+    const f = analysis.fundamentals;
+
+    if (!f || analysis.fundamentalScore === null) {
+        section.classList.add('hidden');
+        return;
+    }
+
+    section.classList.remove('hidden');
+
+    // 來源標示
+    const sourceBadge = document.getElementById('fundamentalSource');
+    sourceBadge.textContent = `資料來源：${f.source}`;
+
+    // 評分條
+    const score = analysis.fundamentalScore;
+    document.getElementById('fundamentalBar').style.width = `${score}%`;
+    document.getElementById('fundamentalScoreVal').textContent = score;
+
+    // 各項財報數據
+    const grid = document.getElementById('fundamentalGrid');
+    let html = '';
+
+    const item = (label, value, note, noteClass) => `
+        <div class="fund-item">
+            <div class="fund-label">${label}</div>
+            <div class="fund-value">${value}</div>
+            ${note ? `<div class="fund-note ${noteClass || ''}">${note}</div>` : ''}
+        </div>`;
+
+    if (typeof f.per === 'number') {
+        const note = f.per <= 0 ? '公司虧損' : f.per <= 15 ? '估值合理' : f.per >= 30 ? '估值偏高' : '中性';
+        const nc = f.per <= 0 ? 'bad' : f.per <= 15 ? 'good' : f.per >= 30 ? 'warning' : '';
+        html += item('本益比 (PER)', f.per.toFixed(2), note, nc);
+    }
+    if (typeof f.pbr === 'number') {
+        html += item('股價淨值比 (PBR)', f.pbr.toFixed(2),
+            f.pbr <= 1.5 ? '低於淨值附近' : f.pbr >= 5 ? '溢價偏高' : '', 
+            f.pbr <= 1.5 ? 'good' : f.pbr >= 5 ? 'warning' : '');
+    }
+    if (typeof f.dividendYield === 'number') {
+        html += item('殖利率', `${f.dividendYield.toFixed(2)}%`,
+            f.dividendYield >= 4 ? '配息吸引' : f.dividendYield < 1 ? '配息偏低' : '',
+            f.dividendYield >= 4 ? 'good' : f.dividendYield < 1 ? 'warning' : '');
+    }
+    if (typeof f.revenueYoY === 'number') {
+        html += item('月營收年增',
+            `${f.revenueYoY >= 0 ? '+' : ''}${f.revenueYoY.toFixed(1)}%`,
+            f.revenueMonth ? `${f.revenueMonth} 資料` : '',
+            f.revenueYoY >= 0 ? 'good' : 'bad');
+    }
+    if (typeof f.eps === 'number') {
+        html += item('每股盈餘 (EPS)', f.eps.toFixed(2), '', '');
+    }
+    if (typeof f.marketCap === 'number' && f.marketCap > 0) {
+        const cap = f.marketCap >= 1e12 ? `${(f.marketCap / 1e12).toFixed(2)} 兆`
+            : f.marketCap >= 1e8 ? `${(f.marketCap / 1e8).toFixed(0)} 億` : f.marketCap.toLocaleString();
+        html += item('市值', cap, '', '');
+    }
+
+    grid.innerHTML = html;
+}
+
 // 顯示價格位階與風險指標（全部由價格與成交量推導，不含財報數據）
 function displayPositionMetrics(stockData, analysis) {
     const grid = document.getElementById('positionGrid');
@@ -2057,6 +2382,13 @@ async function requestMergedAIAnalysis(stockData, analysis, newsItems) {
         ? newsItems.map((n, i) => `${i + 1}. ${n.title}`).join('\n')
         : '（無法取得近期新聞）';
 
+    // 有真實財報數據時併入 prompt，讓 AI 判斷更有依據
+    const f = analysis.fundamentals;
+    const fundamentalBlock = f ? `
+
+【基本面（${f.source}）】
+${typeof f.per === 'number' ? `- 本益比：${f.per.toFixed(2)}\n` : ''}${typeof f.pbr === 'number' ? `- 股價淨值比：${f.pbr.toFixed(2)}\n` : ''}${typeof f.dividendYield === 'number' ? `- 殖利率：${f.dividendYield.toFixed(2)}%\n` : ''}${typeof f.revenueYoY === 'number' ? `- 月營收年增：${f.revenueYoY.toFixed(1)}%\n` : ''}${typeof f.eps === 'number' ? `- EPS：${f.eps.toFixed(2)}\n` : ''}`.trimEnd() : '';
+
     const prompt = `你是一位資深投資顧問。請根據以下資訊，對「${stockData.name}（${stockData.symbol}）」同時進行市場情緒分析與投資建議。
 
 【基本資訊】
@@ -2076,7 +2408,7 @@ async function requestMergedAIAnalysis(stockData, analysis, newsItems) {
 - MACD柱狀體: ${indicators.macd?.histogram?.toFixed(3) ?? 'N/A'}
 - KD: K=${indicators.kd?.k?.toFixed(1) ?? 'N/A'}, D=${indicators.kd?.d?.toFixed(1) ?? 'N/A'}
 - 成交量比: ${indicators.volume?.ratio?.toFixed(2) ?? 'N/A'}x (vs 20日均量)
-- 布林通道: 上軌${indicators.bollinger?.upper?.toFixed(2) ?? 'N/A'} / 中軌${indicators.bollinger?.middle?.toFixed(2) ?? 'N/A'} / 下軌${indicators.bollinger?.lower?.toFixed(2) ?? 'N/A'}
+- 布林通道: 上軌${indicators.bollinger?.upper?.toFixed(2) ?? 'N/A'} / 中軌${indicators.bollinger?.middle?.toFixed(2) ?? 'N/A'} / 下軌${indicators.bollinger?.lower?.toFixed(2) ?? 'N/A'}${fundamentalBlock}
 
 【近期新聞標題】
 ${newsTitles}

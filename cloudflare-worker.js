@@ -18,6 +18,8 @@ const ALLOWED_HOSTS = [
   'query1.finance.yahoo.com',
   'query2.finance.yahoo.com',
   'news.google.com',
+  'api.finmindtrade.com',        // 台股基本面（FinMind）
+  'financialmodelingprep.com',   // 美股基本面（FMP）
 ];
 
 export default {

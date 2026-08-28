@@ -36,6 +36,26 @@
                     <button id="saveProxyBtn" class="btn-save-proxy">儲存</button>
                     <span id="proxyStatus" class="proxy-status"></span>
                 </div>
+                <details class="fundamental-keys">
+                    <summary><i class="fas fa-database"></i> 基本面資料金鑰（選填，啟用財報數據）</summary>
+                    <div class="fund-key-row">
+                        <label for="finmindInput">🇹🇼 FinMind Token：</label>
+                        <input type="password" id="finmindInput" placeholder="台股基本面（留空用匿名額度）" autocomplete="off">
+                        <button id="saveFinmindBtn" class="btn-save-key-sm">儲存</button>
+                        <span id="finmindStatus" class="key-status"></span>
+                    </div>
+                    <div class="fund-key-row">
+                        <label for="fmpInput">🇺🇸 FMP API Key：</label>
+                        <input type="password" id="fmpInput" placeholder="美股基本面（financialmodelingprep.com 免費申請）" autocomplete="off">
+                        <button id="saveFmpBtn" class="btn-save-key-sm">儲存</button>
+                        <span id="fmpStatus" class="key-status"></span>
+                    </div>
+                    <p class="fund-key-note">
+                        <i class="fas fa-circle-info"></i>
+                        金鑰只存在你的瀏覽器並透過你自己的 Worker 轉發，不會經過公共代理。
+                        FinMind 可匿名使用（額度較低），FMP 需免費申請金鑰。
+                    </p>
+                </details>
                 <div class="quick-picks">
                     <span class="label">熱門：</span>
                     <button class="quick-btn" data-symbol="2330" data-market="tw">台積電</button>
@@ -250,12 +270,32 @@
                 </div>
             </div>
 
-            <!-- 價格位階與風險（皆為價格衍生指標，不含財報數據） -->
-            <div class="fundamental-section">
-                <h3><i class="fas fa-ruler-vertical"></i> 價格位階與風險</h3>
+            <!-- 基本面（財報數據，僅在有金鑰/資料時顯示） -->
+            <div id="fundamentalSection" class="fundamental-section hidden">
+                <div class="fund-section-head">
+                    <h3><i class="fas fa-building-columns"></i> 基本面</h3>
+                    <span id="fundamentalSource" class="fund-source-badge"></span>
+                </div>
+                <div class="fund-score-bar-row">
+                    <span class="fund-score-label">基本面評分</span>
+                    <div class="score-bar">
+                        <div id="fundamentalBar" class="score-bar-fill" style="width: 0%"></div>
+                    </div>
+                    <span id="fundamentalScoreVal" class="score-item-value">—</span>
+                </div>
+                <div class="fundamental-grid" id="fundamentalGrid"></div>
                 <p class="section-note">
                     <i class="fas fa-circle-info"></i>
-                    以下皆為價格與成交量衍生的指標。本系統的資料來源未提供本益比、殖利率、營收等財報數據，因此不含基本面分析。
+                    本益比的合理範圍因產業而異，成長股的高本益比未必偏貴；基本面評分為通用粗估，僅供參考。
+                </p>
+            </div>
+
+            <!-- 價格位階與風險（皆為價格衍生指標） -->
+            <div class="fundamental-section">
+                <h3><i class="fas fa-ruler-vertical"></i> 價格位階與風險</h3>
+                <p id="positionNote" class="section-note">
+                    <i class="fas fa-circle-info"></i>
+                    以下皆為價格與成交量衍生的指標（非財報數據）。
                 </p>
                 <div class="fundamental-grid" id="positionGrid">
                     —
