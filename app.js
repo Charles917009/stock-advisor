@@ -335,8 +335,17 @@ async function callGemini(prompt, { temperature = 0.6, maxOutputTokens = 8192 } 
                     }
 
                     // 金鑰、權限、配額問題重試也不會好，直接回報，不浪費額度
+                    // （此判斷須在「過載換模型」之前，因為配額用盡換模型也沒用）
                     const fatal = /api[ _-]?key|permission|unauthenticated|unauthorized|quota|exhausted|billing/i
                         .test(lastError);
+
+                    // 模型過載/暫時無法使用（503，或訊息提及高流量）→ 換下一個候選模型再試。
+                    // 不同模型負載不同，較冷門的模型通常還能用。
+                    if (!fatal && (response.status === 503 ||
+                        /high demand|overloaded|unavailable|try again/i.test(lastError))) {
+                        modelMissing = true; // 借用同一個「換模型」路徑
+                        break;
+                    }
 
                     // 400 且這次帶了 thinkingConfig → 極可能是該模型不接受此參數。
                     // Google 有時只回籠統的「Request contains an invalid argument」，
