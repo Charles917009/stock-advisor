@@ -189,6 +189,32 @@
                 </div>
             </div>
 
+            <!-- 價格走勢圖 -->
+            <div class="chart-section">
+                <div class="chart-header">
+                    <h3><i class="fas fa-chart-area"></i> 價格走勢</h3>
+                    <div class="chart-controls">
+                        <div class="chart-range-toggle">
+                            <button class="chart-range-btn" data-days="60">3 個月</button>
+                            <button class="chart-range-btn active" data-days="120">6 個月</button>
+                            <button class="chart-range-btn" data-days="0">全部</button>
+                        </div>
+                        <div class="chart-legend">
+                            <span class="legend-item"><i class="legend-line price"></i>收盤價</span>
+                            <span class="legend-item"><i class="legend-line ma20"></i>MA20</span>
+                            <span class="legend-item"><i class="legend-line ma60"></i>MA60</span>
+                            <span class="legend-item"><i class="legend-band"></i>布林通道</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="chart-canvas-wrap">
+                    <canvas id="priceChart" role="img"
+                        aria-label="股價走勢圖，包含收盤價、20日與60日移動平均線、布林通道與成交量"></canvas>
+                    <div id="chartTooltip" class="chart-tooltip hidden" aria-hidden="true"></div>
+                </div>
+                <p id="chartSummary" class="chart-summary"></p>
+            </div>
+
             <!-- 技術指標 -->
             <div class="indicators-grid">
                 <div class="indicator-card">

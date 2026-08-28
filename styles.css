@@ -1399,6 +1399,184 @@ body {
     font-size: 0.8rem;
 }
 
+/* ===== 價格走勢圖 ===== */
+.chart-section {
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 28px;
+    box-shadow: var(--shadow);
+    margin-bottom: 24px;
+}
+
+.chart-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 16px;
+    flex-wrap: wrap;
+    margin-bottom: 18px;
+}
+
+.chart-header h3 {
+    font-size: 1.05rem;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.chart-header h3 i {
+    color: var(--primary-light);
+}
+
+.chart-controls {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 10px;
+}
+
+.chart-range-toggle {
+    display: flex;
+    gap: 6px;
+}
+
+.chart-range-btn {
+    padding: 5px 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-xs);
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 0.76rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    font-family: inherit;
+}
+
+.chart-range-btn:hover {
+    border-color: var(--primary);
+    color: var(--primary-light);
+}
+
+.chart-range-btn.active {
+    background: var(--primary);
+    color: white;
+    border-color: var(--primary);
+}
+
+.chart-legend {
+    display: flex;
+    gap: 14px;
+    flex-wrap: wrap;
+}
+
+.legend-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.72rem;
+    color: var(--text-muted);
+}
+
+.legend-line {
+    width: 16px;
+    height: 2px;
+    border-radius: 1px;
+    display: inline-block;
+}
+
+.legend-line.price { background: #818cf8; }
+.legend-line.ma20 { background: #34d399; }
+.legend-line.ma60 { background: #fbbf24; }
+
+.legend-band {
+    width: 16px;
+    height: 10px;
+    border-radius: 2px;
+    display: inline-block;
+    background: rgba(148, 163, 184, 0.15);
+    border: 1px dashed rgba(148, 163, 184, 0.4);
+}
+
+.chart-canvas-wrap {
+    position: relative;
+    width: 100%;
+}
+
+#priceChart {
+    display: block;
+    width: 100%;
+    cursor: crosshair;
+}
+
+.chart-tooltip {
+    position: absolute;
+    z-index: 5;
+    min-width: 132px;
+    padding: 10px 12px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-xs);
+    box-shadow: var(--shadow-lg);
+    font-size: 0.76rem;
+    pointer-events: none;
+    transition: opacity 0.12s ease;
+}
+
+.chart-tooltip.hidden {
+    opacity: 0;
+    visibility: hidden;
+}
+
+.chart-tooltip .tt-date {
+    font-weight: 600;
+    color: var(--text);
+    margin-bottom: 6px;
+    padding-bottom: 5px;
+    border-bottom: 1px solid var(--border-light);
+}
+
+.chart-tooltip .tt-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 14px;
+    padding: 2px 0;
+    color: var(--text-muted);
+}
+
+.chart-tooltip .tt-row b {
+    color: var(--text-secondary);
+    font-weight: 600;
+}
+
+.chart-summary {
+    margin-top: 14px;
+    font-size: 0.78rem;
+    color: var(--text-muted);
+    line-height: 1.7;
+}
+
+@media (max-width: 640px) {
+    .chart-section {
+        padding: 20px 16px;
+    }
+
+    .chart-header {
+        flex-direction: column;
+    }
+
+    .chart-controls {
+        align-items: flex-start;
+        width: 100%;
+    }
+
+    .chart-legend {
+        gap: 10px;
+    }
+}
+
 /* ===== 適用策略標示 ===== */
 .strategy-badge {
     display: inline-flex;

@@ -949,6 +949,310 @@ function performAnalysis(stockData) {
     };
 }
 
+// ===== 價格走勢圖（原生 canvas，不依賴外部繪圖庫）=====
+
+const CHART_COLORS = {
+    price: '#818cf8',
+    priceFill: 'rgba(129, 140, 248, 0.12)',
+    ma20: '#34d399',
+    ma60: '#fbbf24',
+    band: 'rgba(148, 163, 184, 0.10)',
+    bandLine: 'rgba(148, 163, 184, 0.25)',
+    grid: 'rgba(148, 163, 184, 0.10)',
+    axis: '#64748b',
+    volumeUp: 'rgba(239, 68, 68, 0.35)',
+    volumeDown: 'rgba(16, 185, 129, 0.35)',
+    crosshair: 'rgba(148, 163, 184, 0.5)'
+};
+
+// 圖表目前的狀態，供切換區間與滑鼠互動使用
+let chartState = {
+    stockData: null,
+    days: 120,
+    layout: null
+};
+
+/**
+ * 繪製走勢圖。
+ * 圖表分兩區：上方 78% 畫價格與均線、布林通道；下方 22% 畫成交量。
+ */
+function renderPriceChart(stockData, days = chartState.days) {
+    const canvas = document.getElementById('priceChart');
+    if (!canvas || !stockData) return;
+
+    chartState.stockData = stockData;
+    chartState.days = days;
+
+    const allPrices = stockData.prices;
+    // 均線需要前置資料才能算得準，因此多取 60 筆再裁切顯示範圍
+    const visibleCount = days > 0 ? Math.min(days, allPrices.length) : allPrices.length;
+    const sliceStart = Math.max(0, allPrices.length - visibleCount);
+
+    const ma20Full = calculateMA(allPrices, 20);
+    const ma60Full = calculateMA(allPrices, 60);
+    // calculateMA 回傳陣列的第 i 筆對應原始資料的第 (period-1+i) 筆
+    const maAt = (maArr, period, idx) => {
+        const pos = idx - (period - 1);
+        return pos >= 0 && pos < maArr.length ? maArr[pos] : null;
+    };
+
+    const points = [];
+    for (let i = sliceStart; i < allPrices.length; i++) {
+        points.push({
+            index: i,
+            date: allPrices[i].date,
+            close: allPrices[i].close,
+            volume: allPrices[i].volume || 0,
+            up: i > 0 ? allPrices[i].close >= allPrices[i - 1].close : true,
+            ma20: maAt(ma20Full, 20, i),
+            ma60: maAt(ma60Full, 60, i)
+        });
+    }
+
+    if (points.length < 2) return;
+
+    // 布林通道逐點計算（20 日）
+    points.forEach(p => {
+        if (p.index < 19) { p.upper = null; p.lower = null; return; }
+        const window = allPrices.slice(p.index - 19, p.index + 1).map(x => x.close);
+        const mean = window.reduce((s, v) => s + v, 0) / window.length;
+        const variance = window.reduce((s, v) => s + (v - mean) ** 2, 0) / window.length;
+        const sd = Math.sqrt(variance);
+        p.upper = mean + 2 * sd;
+        p.lower = mean - 2 * sd;
+    });
+
+    // 依裝置像素比設定實際解析度，避免在高解析螢幕上模糊
+    const dpr = window.devicePixelRatio || 1;
+    const cssWidth = canvas.parentElement.clientWidth;
+    const cssHeight = 320;
+    canvas.width = cssWidth * dpr;
+    canvas.height = cssHeight * dpr;
+    canvas.style.width = cssWidth + 'px';
+    canvas.style.height = cssHeight + 'px';
+
+    const ctx = canvas.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, cssWidth, cssHeight);
+
+    const pad = { top: 16, right: 56, bottom: 26, left: 12 };
+    const priceH = (cssHeight - pad.top - pad.bottom) * 0.78;
+    const volumeH = (cssHeight - pad.top - pad.bottom) * 0.22;
+    const plotW = cssWidth - pad.left - pad.right;
+    const volumeTop = pad.top + priceH + 8;
+
+    // Y 軸範圍涵蓋價格與布林通道
+    const values = [];
+    points.forEach(p => {
+        values.push(p.close);
+        if (p.ma20 !== null) values.push(p.ma20);
+        if (p.ma60 !== null) values.push(p.ma60);
+        if (p.upper !== null) values.push(p.upper);
+        if (p.lower !== null) values.push(p.lower);
+    });
+    let minV = Math.min(...values);
+    let maxV = Math.max(...values);
+    const span = maxV - minV || 1;
+    minV -= span * 0.06;
+    maxV += span * 0.06;
+
+    const maxVolume = Math.max(...points.map(p => p.volume), 1);
+
+    const xAt = i => pad.left + (plotW * i) / (points.length - 1);
+    const yAt = v => pad.top + priceH - ((v - minV) / (maxV - minV)) * priceH;
+
+    // ---- 網格與 Y 軸標籤 ----
+    ctx.font = '11px "Noto Sans TC", sans-serif';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    const gridLines = 4;
+    for (let g = 0; g <= gridLines; g++) {
+        const v = minV + ((maxV - minV) * g) / gridLines;
+        const y = yAt(v);
+        ctx.strokeStyle = CHART_COLORS.grid;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(pad.left, y);
+        ctx.lineTo(pad.left + plotW, y);
+        ctx.stroke();
+        ctx.fillStyle = CHART_COLORS.axis;
+        ctx.fillText(v.toFixed(v >= 100 ? 0 : 2), pad.left + plotW + 8, y);
+    }
+
+    // ---- 布林通道帶狀區 ----
+    const banded = points.filter(p => p.upper !== null && p.lower !== null);
+    if (banded.length > 1) {
+        ctx.beginPath();
+        banded.forEach((p, k) => {
+            const x = xAt(points.indexOf(p));
+            k === 0 ? ctx.moveTo(x, yAt(p.upper)) : ctx.lineTo(x, yAt(p.upper));
+        });
+        for (let k = banded.length - 1; k >= 0; k--) {
+            const p = banded[k];
+            ctx.lineTo(xAt(points.indexOf(p)), yAt(p.lower));
+        }
+        ctx.closePath();
+        ctx.fillStyle = CHART_COLORS.band;
+        ctx.fill();
+
+        // 上下軌線
+        [['upper'], ['lower']].forEach(([key]) => {
+            ctx.beginPath();
+            banded.forEach((p, k) => {
+                const x = xAt(points.indexOf(p));
+                k === 0 ? ctx.moveTo(x, yAt(p[key])) : ctx.lineTo(x, yAt(p[key]));
+            });
+            ctx.strokeStyle = CHART_COLORS.bandLine;
+            ctx.lineWidth = 1;
+            ctx.setLineDash([3, 3]);
+            ctx.stroke();
+            ctx.setLineDash([]);
+        });
+    }
+
+    // ---- 成交量 ----
+    const barW = Math.max(1, plotW / points.length * 0.62);
+    points.forEach((p, i) => {
+        const h = (p.volume / maxVolume) * volumeH;
+        ctx.fillStyle = p.up ? CHART_COLORS.volumeUp : CHART_COLORS.volumeDown;
+        ctx.fillRect(xAt(i) - barW / 2, volumeTop + volumeH - h, barW, h);
+    });
+
+    // ---- 收盤價區域填色 ----
+    ctx.beginPath();
+    points.forEach((p, i) => {
+        i === 0 ? ctx.moveTo(xAt(i), yAt(p.close)) : ctx.lineTo(xAt(i), yAt(p.close));
+    });
+    ctx.lineTo(xAt(points.length - 1), pad.top + priceH);
+    ctx.lineTo(xAt(0), pad.top + priceH);
+    ctx.closePath();
+    ctx.fillStyle = CHART_COLORS.priceFill;
+    ctx.fill();
+
+    // ---- 線條 ----
+    const drawLine = (key, color, width) => {
+        ctx.beginPath();
+        let started = false;
+        points.forEach((p, i) => {
+            const v = p[key];
+            if (v === null || v === undefined) return;
+            const x = xAt(i), y = yAt(v);
+            started ? ctx.lineTo(x, y) : (ctx.moveTo(x, y), started = true);
+        });
+        ctx.strokeStyle = color;
+        ctx.lineWidth = width;
+        ctx.lineJoin = 'round';
+        ctx.stroke();
+    };
+
+    drawLine('ma60', CHART_COLORS.ma60, 1.4);
+    drawLine('ma20', CHART_COLORS.ma20, 1.4);
+    drawLine('close', CHART_COLORS.price, 2);
+
+    // ---- X 軸日期標籤 ----
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    ctx.fillStyle = CHART_COLORS.axis;
+    const labelCount = Math.min(6, points.length);
+    for (let k = 0; k < labelCount; k++) {
+        const i = Math.round((points.length - 1) * k / (labelCount - 1));
+        const d = points[i].date;
+        ctx.fillText(`${d.getMonth() + 1}/${d.getDate()}`, xAt(i), cssHeight - pad.bottom + 8);
+    }
+
+    // 保存版面資訊供滑鼠互動使用
+    chartState.layout = { points, xAt, yAt, pad, plotW, priceH, cssWidth, cssHeight, currency: stockData.currency };
+
+    renderChartSummary(points, stockData);
+}
+
+// 圖表下方的文字摘要：讓看不清圖或使用輔助技術的使用者也能取得資訊
+function renderChartSummary(points, stockData) {
+    const el = document.getElementById('chartSummary');
+    if (!el) return;
+
+    const first = points[0].close;
+    const lastPt = points[points.length - 1];
+    const change = ((lastPt.close - first) / first) * 100;
+    const highest = Math.max(...points.map(p => p.close));
+    const lowest = Math.min(...points.map(p => p.close));
+    const cur = stockData.currency === 'TWD' ? 'NT$' : '$';
+
+    el.textContent = `區間 ${points.length} 個交易日：`
+        + `期初 ${cur}${first.toFixed(2)} → 期末 ${cur}${lastPt.close.toFixed(2)}`
+        + `（${change >= 0 ? '+' : ''}${change.toFixed(2)}%），`
+        + `最高 ${cur}${highest.toFixed(2)}、最低 ${cur}${lowest.toFixed(2)}。`;
+}
+
+// 滑鼠移動時顯示該日資料
+function setupChartInteraction() {
+    const canvas = document.getElementById('priceChart');
+    const tooltip = document.getElementById('chartTooltip');
+    if (!canvas || !tooltip) return;
+
+    canvas.addEventListener('mousemove', (e) => {
+        const layout = chartState.layout;
+        if (!layout) return;
+
+        const rect = canvas.getBoundingClientRect();
+        const x = e.clientX - rect.left;
+
+        // 找出最接近的資料點
+        const ratio = (x - layout.pad.left) / layout.plotW;
+        const idx = Math.round(ratio * (layout.points.length - 1));
+        if (idx < 0 || idx >= layout.points.length) {
+            tooltip.classList.add('hidden');
+            return;
+        }
+
+        const p = layout.points[idx];
+        const cur = layout.currency === 'TWD' ? 'NT$' : '$';
+        const d = p.date;
+
+        tooltip.innerHTML = `
+            <div class="tt-date">${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}</div>
+            <div class="tt-row"><span>收盤</span><b>${cur}${p.close.toFixed(2)}</b></div>
+            ${p.ma20 !== null ? `<div class="tt-row"><span>MA20</span><b>${p.ma20.toFixed(2)}</b></div>` : ''}
+            ${p.ma60 !== null ? `<div class="tt-row"><span>MA60</span><b>${p.ma60.toFixed(2)}</b></div>` : ''}
+            <div class="tt-row"><span>成交量</span><b>${formatVolume(p.volume)}</b></div>
+        `;
+        tooltip.classList.remove('hidden');
+
+        // 避免提示框超出圖表右緣
+        const ttW = tooltip.offsetWidth;
+        let left = layout.xAt(idx) + 12;
+        if (left + ttW > layout.cssWidth) left = layout.xAt(idx) - ttW - 12;
+        tooltip.style.left = `${Math.max(0, left)}px`;
+        tooltip.style.top = `${Math.max(0, layout.yAt(p.close) - 10)}px`;
+    });
+
+    canvas.addEventListener('mouseleave', () => {
+        tooltip.classList.add('hidden');
+    });
+
+    // 區間切換
+    document.querySelectorAll('.chart-range-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            document.querySelectorAll('.chart-range-btn').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            if (chartState.stockData) {
+                renderPriceChart(chartState.stockData, parseInt(btn.dataset.days, 10));
+            }
+        });
+    });
+
+    // 視窗寬度改變時重繪，維持 canvas 與容器同寬
+    let resizeTimer = null;
+    window.addEventListener('resize', () => {
+        clearTimeout(resizeTimer);
+        resizeTimer = setTimeout(() => {
+            if (chartState.stockData) renderPriceChart(chartState.stockData, chartState.days);
+        }, 150);
+    });
+}
+
+setupChartInteraction();
+
 // ===== 顯示結果 =====
 function displayResults(stockData, analysis) {
     resultSection.classList.remove('hidden');
@@ -969,6 +1273,9 @@ function displayResults(stockData, analysis) {
 
     // 綜合評分
     displayScore(analysis);
+
+    // 價格走勢圖
+    renderPriceChart(stockData);
 
     // 技術指標
     displayIndicators(stockData, analysis);
