@@ -283,7 +283,7 @@ async function resolveGeminiModel(apiKey) {
  * 呼叫 Gemini 產生文字。
  * @returns {Promise<{text: string|null, error: string|null}>}
  */
-async function callGemini(prompt, { temperature = 0.6, maxOutputTokens = 2048 } = {}) {
+async function callGemini(prompt, { temperature = 0.6, maxOutputTokens = 8192 } = {}) {
     const apiKey = getGeminiKey();
     if (!apiKey) return { text: null, error: '未設定 API Key' };
 
@@ -295,8 +295,10 @@ async function callGemini(prompt, { temperature = 0.6, maxOutputTokens = 2048 } 
 
     for (const model of models) {
         // 新版模型預設開啟 thinking，推理 token 會佔用 maxOutputTokens 額度，
-        // 造成正式回答被截斷。優先嘗試關閉 thinking；
-        // 若該模型不支援這個參數（如 Gemini 3.x 改用 thinking_level），再退回預設設定。
+        // 造成正式回答被截斷。策略：
+        // 1) 先試關閉 thinking（thinkingBudget:0，Gemini 2.5 系列有效）
+        // 2) 若模型拒絕該參數或仍思考，退回不帶參數但拉高 token 上限到 8192（免費 flash 上限），
+        //    讓「思考 + 正式回答」都有足夠空間
         const configVariants = [
             { temperature, maxOutputTokens, thinkingConfig: { thinkingBudget: 0 } },
             { temperature, maxOutputTokens }
@@ -366,9 +368,9 @@ async function callGemini(prompt, { temperature = 0.6, maxOutputTokens = 2048 } 
                     return { text, error: null };
                 }
 
-                // 沒拿到文字：若是被 token 上限截斷，改試下一組設定（關閉 thinking 可釋出額度）
+                // 沒拿到文字：若被 token 上限截斷，改試下一組設定（不帶 thinking 參數 + 高額度）
                 if (candidate?.finishReason === 'MAX_TOKENS') {
-                    lastError = '回應被 token 上限截斷（thinking 佔用額度）';
+                    lastError = '回應被 token 上限截斷（思考佔用額度過多）';
                     continue;
                 }
 
@@ -2435,7 +2437,7 @@ ${newsTitles}
 ###風險提醒###
 （主要需注意的風險因素）`;
 
-    const { text, error } = await callGemini(prompt, { temperature: 0.6, maxOutputTokens: 2048 });
+    const { text, error } = await callGemini(prompt, { temperature: 0.6, maxOutputTokens: 8192 });
     if (error) {
         console.warn('AI 分析失敗:', error);
         return null;
