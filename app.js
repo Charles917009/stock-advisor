@@ -215,8 +215,14 @@ async function callGemini(prompt, { temperature = 0.6, maxOutputTokens = 2048 } 
                         break;
                     }
 
-                    // thinking 參數不被支援 → 用同一模型改試下一組設定
-                    if (response.status === 400 && /thinking/i.test(lastError)) {
+                    // 金鑰、權限、配額問題重試也不會好，直接回報，不浪費額度
+                    const fatal = /api[ _-]?key|permission|unauthenticated|unauthorized|quota|exhausted|billing/i
+                        .test(lastError);
+
+                    // 400 且這次帶了 thinkingConfig → 極可能是該模型不接受此參數。
+                    // Google 有時只回籠統的「Request contains an invalid argument」，
+                    // 不會明講是哪個欄位，所以不依賴錯誤訊息內容，直接改試不帶該參數的設定。
+                    if (!fatal && response.status === 400 && generationConfig.thinkingConfig) {
                         continue;
                     }
 
