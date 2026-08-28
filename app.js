@@ -38,6 +38,39 @@ stockInput.addEventListener('keypress', (e) => {
     if (e.key === 'Enter') analyzeStock();
 });
 
+// ===== Proxy 設定 UI =====
+const proxyInput = document.getElementById('proxyInput');
+const saveProxyBtn = document.getElementById('saveProxyBtn');
+const proxyStatus = document.getElementById('proxyStatus');
+
+// 載入已儲存的 Proxy
+(function loadSavedProxy() {
+    const saved = localStorage.getItem('stock_proxy_url');
+    if (saved) {
+        proxyInput.value = saved;
+        proxyStatus.textContent = '✓ 已設定';
+        proxyStatus.className = 'proxy-status saved';
+    }
+})();
+
+saveProxyBtn.addEventListener('click', () => {
+    const value = proxyInput.value.trim();
+    if (value) {
+        if (!/^https:\/\//.test(value)) {
+            proxyStatus.textContent = '需為 https 網址';
+            proxyStatus.className = 'proxy-status error';
+            return;
+        }
+        localStorage.setItem('stock_proxy_url', value.replace(/\/$/, ''));
+        proxyStatus.textContent = '✓ 已設定';
+        proxyStatus.className = 'proxy-status saved';
+    } else {
+        localStorage.removeItem('stock_proxy_url');
+        proxyStatus.textContent = '已清除';
+        proxyStatus.className = 'proxy-status error';
+    }
+});
+
 // ===== 主分析函數 =====
 async function analyzeStock() {
     const symbol = stockInput.value.trim().toUpperCase();
@@ -61,6 +94,71 @@ async function analyzeStock() {
     }
 }
 
+// ===== Proxy 設定 =====
+
+// 取得使用者自訂的 Proxy 網址
+function getCustomProxy() {
+    return (localStorage.getItem('stock_proxy_url') || '').trim().replace(/\/$/, '');
+}
+
+/**
+ * 透過各種方式取得 JSON 資料
+ * 優先順序：使用者自訂 Worker → 公共 proxy → 直接呼叫
+ */
+async function fetchJsonViaProxy(targetUrl) {
+    const attempts = [];
+
+    // 1. 使用者自訂的 Cloudflare Worker（最可靠）
+    const customProxy = getCustomProxy();
+    if (customProxy) {
+        attempts.push({
+            url: `${customProxy}/?url=${encodeURIComponent(targetUrl)}`,
+            unwrap: null
+        });
+    }
+
+    // 2. 公共 proxy 備援（可能失效）
+    attempts.push(
+        { url: `https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}`, unwrap: 'contents' },
+        { url: `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(targetUrl)}`, unwrap: null },
+        { url: `https://api.cors.lol/?url=${encodeURIComponent(targetUrl)}`, unwrap: null }
+    );
+
+    // 3. 直接呼叫（本機 Live Server 可能成功）
+    attempts.push({ url: targetUrl, unwrap: null });
+
+    for (const attempt of attempts) {
+        try {
+            const response = await fetch(attempt.url);
+            if (!response.ok) continue;
+
+            const text = await response.text();
+            let parsed;
+            try {
+                parsed = JSON.parse(text);
+            } catch {
+                continue;
+            }
+
+            if (attempt.unwrap) {
+                const inner = parsed[attempt.unwrap];
+                if (!inner) continue;
+                try {
+                    return JSON.parse(inner);
+                } catch {
+                    continue;
+                }
+            }
+
+            return parsed;
+        } catch (e) {
+            continue;
+        }
+    }
+
+    return null;
+}
+
 // ===== 數據獲取 =====
 async function fetchStockData(symbol, market) {
     const tickerSymbol = market === 'tw' ? `${symbol}.TW` : symbol;
@@ -69,82 +167,26 @@ async function fetchStockData(symbol, market) {
     const endDate = Math.floor(Date.now() / 1000);
     const startDate = endDate - (180 * 24 * 60 * 60); // 180 天
 
-    // 嘗試多個 Yahoo Finance endpoint
     const yahooUrls = [
-        `https://query1.finance.yahoo.com/v8/finance/chart/${tickerSymbol}?period1=${startDate}&period2=${endDate}&interval=1d&includePrePost=false`,
-        `https://query2.finance.yahoo.com/v8/finance/chart/${tickerSymbol}?period1=${startDate}&period2=${endDate}&interval=1d&includePrePost=false`
+        `https://query1.finance.yahoo.com/v8/finance/chart/${tickerSymbol}?period1=${startDate}&period2=${endDate}&interval=1d`,
+        `https://query2.finance.yahoo.com/v8/finance/chart/${tickerSymbol}?period1=${startDate}&period2=${endDate}&interval=1d`
     ];
 
     let data = null;
-
-    // 方法1：透過 allorigins (包裝成 JSON 模式，更穩定)
     for (const yahooUrl of yahooUrls) {
-        if (data) break;
-        try {
-            const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(yahooUrl)}`;
-            const response = await fetch(proxyUrl);
-            if (response.ok) {
-                const wrapper = await response.json();
-                if (wrapper.contents) {
-                    data = JSON.parse(wrapper.contents);
-                    if (data.chart && data.chart.result) break;
-                    data = null;
-                }
-            }
-        } catch (e) {
-            data = null;
+        const result = await fetchJsonViaProxy(yahooUrl);
+        if (result && result.chart && result.chart.result) {
+            data = result;
+            break;
         }
     }
 
-    // 方法2：透過 corsproxy.io
-    if (!data) {
-        for (const yahooUrl of yahooUrls) {
-            if (data) break;
-            try {
-                const response = await fetch(`https://corsproxy.io/?${encodeURIComponent(yahooUrl)}`);
-                if (response.ok) {
-                    data = await response.json();
-                    if (!(data.chart && data.chart.result)) data = null;
-                }
-            } catch (e) {
-                data = null;
-            }
-        }
+    if (!data || !data.chart || !data.chart.result) {
+        const hasProxy = !!getCustomProxy();
+        throw new Error(hasProxy
+            ? '無法取得數據，請確認股票代號與 Proxy 設定是否正確'
+            : '公共 proxy 目前無法使用，請在「資料來源 Proxy」設定你自己的 Cloudflare Worker 網址');
     }
-
-    // 方法3：透過 thingproxy
-    if (!data) {
-        for (const yahooUrl of yahooUrls) {
-            if (data) break;
-            try {
-                const response = await fetch(`https://thingproxy.freeboard.io/fetch/${yahooUrl}`);
-                if (response.ok) {
-                    data = await response.json();
-                    if (!(data.chart && data.chart.result)) data = null;
-                }
-            } catch (e) {
-                data = null;
-            }
-        }
-    }
-
-    // 方法4：直接呼叫（本機環境）
-    if (!data) {
-        for (const yahooUrl of yahooUrls) {
-            try {
-                const response = await fetch(yahooUrl);
-                if (response.ok) {
-                    data = await response.json();
-                    if (data.chart && data.chart.result) break;
-                    data = null;
-                }
-            } catch (e) {
-                data = null;
-            }
-        }
-    }
-
-    if (!data || !data.chart || !data.chart.result) throw new Error('無法取得數據，請稍後再試');
 
     const result = data.chart.result[0];
 
@@ -1033,46 +1075,15 @@ const STOCK_LISTS_FALLBACK = {
 async function fetchTrendingTickers(region = 'US') {
     const url = `https://query1.finance.yahoo.com/v1/finance/trending/${region}?count=25`;
 
-    const corsProxies = [
-        `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
-        `https://corsproxy.io/?${encodeURIComponent(url)}`,
-        `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`
-    ];
+    const data = await fetchJsonViaProxy(url);
+    const quotes = data?.finance?.result?.[0]?.quotes;
 
-    for (const proxyUrl of corsProxies) {
-        try {
-            const response = await fetch(proxyUrl);
-            if (!response.ok) continue;
-            const data = await response.json();
-            const quotes = data?.finance?.result?.[0]?.quotes;
-            if (quotes && quotes.length > 0) {
-                return quotes.map(q => ({
-                    symbol: q.symbol.replace('.TW', ''),
-                    name: q.shortName || q.symbol.replace('.TW', ''),
-                    market: region === 'TW' ? 'tw' : 'us'
-                }));
-            }
-        } catch (e) {
-            console.warn(`Trending API (${region}) 失敗:`, e.message);
-        }
-    }
-
-    // 嘗試直接呼叫
-    try {
-        const response = await fetch(url);
-        if (response.ok) {
-            const data = await response.json();
-            const quotes = data?.finance?.result?.[0]?.quotes;
-            if (quotes && quotes.length > 0) {
-                return quotes.map(q => ({
-                    symbol: q.symbol.replace('.TW', ''),
-                    name: q.shortName || q.symbol.replace('.TW', ''),
-                    market: region === 'TW' ? 'tw' : 'us'
-                }));
-            }
-        }
-    } catch (e) {
-        console.warn('直接呼叫也失敗');
+    if (quotes && quotes.length > 0) {
+        return quotes.map(q => ({
+            symbol: q.symbol.replace('.TW', ''),
+            name: q.shortName || q.symbol.replace('.TW', ''),
+            market: region === 'TW' ? 'tw' : 'us'
+        }));
     }
 
     return null; // 返回 null 表示失敗
