@@ -94,6 +94,134 @@ async function analyzeStock() {
     }
 }
 
+// ===== Gemini API 共用邏輯 =====
+
+// 候選模型（依偏好排序）。Google 會定期淘汰舊模型，
+// 例如 gemini-1.5-flash 已停用並回傳 404，
+// 所以實際使用的模型會先透過 ListModels 動態偵測。
+const GEMINI_MODEL_CANDIDATES = [
+    'gemini-3.6-flash',
+    'gemini-3.5-flash',
+    'gemini-3.5-flash-lite',
+    'gemini-3-flash',
+    'gemini-2.5-flash',
+    'gemini-2.0-flash'
+];
+
+let resolvedGeminiModel = null;
+
+// 記錄最近一次 Gemini 錯誤，用於在畫面上提示使用者
+let lastGeminiError = null;
+
+/**
+ * 向 Gemini 查詢目前金鑰可用的模型，挑一個支援 generateContent 的 flash 模型。
+ * 結果會快取，避免每次分析都多打一次 API。
+ */
+async function resolveGeminiModel(apiKey) {
+    if (resolvedGeminiModel) return resolvedGeminiModel;
+
+    const cached = localStorage.getItem('gemini_model');
+    if (cached) {
+        resolvedGeminiModel = cached;
+        return cached;
+    }
+
+    try {
+        const response = await fetch(
+            `https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`
+        );
+        if (response.ok) {
+            const data = await response.json();
+            const usable = (data.models || [])
+                .filter(m => (m.supportedGenerationMethods || []).includes('generateContent'))
+                .map(m => m.name.replace(/^models\//, ''));
+
+            // 優先選候選清單中最前面的可用模型
+            let picked = GEMINI_MODEL_CANDIDATES.find(c => usable.includes(c));
+
+            // 候選都不在，就退而求其次挑任一 flash 模型
+            if (!picked) {
+                picked = usable.find(n => n.includes('flash') && !n.includes('image') && !n.includes('tts'));
+            }
+
+            if (picked) {
+                resolvedGeminiModel = picked;
+                localStorage.setItem('gemini_model', picked);
+                console.log('Gemini 使用模型:', picked);
+                return picked;
+            }
+        } else {
+            const errBody = await response.json().catch(() => ({}));
+            lastGeminiError = errBody?.error?.message || `列出模型失敗 HTTP ${response.status}`;
+        }
+    } catch (e) {
+        console.warn('無法列出 Gemini 模型:', e.message);
+    }
+
+    // 偵測失敗就用第一個候選硬試
+    return GEMINI_MODEL_CANDIDATES[0];
+}
+
+/**
+ * 呼叫 Gemini 產生文字。
+ * @returns {Promise<{text: string|null, error: string|null}>}
+ */
+async function callGemini(prompt, { temperature = 0.6, maxOutputTokens = 600 } = {}) {
+    const apiKey = getGeminiKey();
+    if (!apiKey) return { text: null, error: '未設定 API Key' };
+
+    const primary = await resolveGeminiModel(apiKey);
+
+    // 先用偵測到的模型，失敗時再依序試其他候選
+    const models = [primary, ...GEMINI_MODEL_CANDIDATES.filter(m => m !== primary)];
+    let lastError = null;
+
+    for (const model of models) {
+        try {
+            const response = await fetch(
+                `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+                {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        contents: [{ parts: [{ text: prompt }] }],
+                        generationConfig: { temperature, maxOutputTokens }
+                    })
+                }
+            );
+
+            if (!response.ok) {
+                const errBody = await response.json().catch(() => ({}));
+                lastError = errBody?.error?.message || `HTTP ${response.status}`;
+                console.warn(`Gemini 模型 ${model} 失敗:`, lastError);
+
+                // 模型不存在才換下一個；其他錯誤（金鑰無效、額度用盡）直接回報
+                if (response.status === 404) continue;
+                lastGeminiError = lastError;
+                return { text: null, error: lastError };
+            }
+
+            const data = await response.json();
+            const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+
+            if (text) {
+                // 記住這個可用的模型
+                resolvedGeminiModel = model;
+                localStorage.setItem('gemini_model', model);
+                lastGeminiError = null;
+                return { text, error: null };
+            }
+
+            lastError = '回應內容為空';
+        } catch (e) {
+            lastError = e.message;
+        }
+    }
+
+    lastGeminiError = lastError || '所有模型都無法使用';
+    return { text: null, error: lastGeminiError };
+}
+
 // ===== Proxy 設定 =====
 
 // 取得使用者自訂的 Proxy 網址
@@ -972,30 +1100,9 @@ async function generateAIAdvice(stockData, analysis) {
 
 請簡潔有力，總字數不超過 300 字。`;
 
-    try {
-        const response = await fetch(
-            `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`,
-            {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    contents: [{ parts: [{ text: prompt }] }],
-                    generationConfig: {
-                        temperature: 0.6,
-                        maxOutputTokens: 600
-                    }
-                })
-            }
-        );
-
-        if (!response.ok) return null;
-
-        const data = await response.json();
-        return data.candidates?.[0]?.content?.parts?.[0]?.text || null;
-    } catch (error) {
-        console.error('AI 投資建議生成失敗:', error);
-        return null;
-    }
+    const { text, error } = await callGemini(prompt, { temperature: 0.6, maxOutputTokens: 600 });
+    if (error) console.warn('AI 投資建議生成失敗:', error);
+    return text;
 }
 
 // ===== 工具函數 =====
@@ -1321,10 +1428,16 @@ saveKeyBtn.addEventListener('click', () => {
     const key = geminiKeyInput.value.trim();
     if (key) {
         localStorage.setItem('gemini_api_key', key);
+        // 不同金鑰可用的模型不同，清掉快取讓系統重新偵測
+        localStorage.removeItem('gemini_model');
+        resolvedGeminiModel = null;
+        lastGeminiError = null;
         keyStatus.textContent = '✓ 已儲存';
         keyStatus.className = 'key-status saved';
     } else {
         localStorage.removeItem('gemini_api_key');
+        localStorage.removeItem('gemini_model');
+        resolvedGeminiModel = null;
         keyStatus.textContent = '已清除';
         keyStatus.className = 'key-status error';
     }
@@ -1473,35 +1586,9 @@ ${techSummary}
 
 請簡潔有力，不要超過 200 字。`;
 
-    try {
-        const response = await fetch(
-            `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`,
-            {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    contents: [{ parts: [{ text: prompt }] }],
-                    generationConfig: {
-                        temperature: 0.7,
-                        maxOutputTokens: 500
-                    }
-                })
-            }
-        );
-
-        if (!response.ok) {
-            const errData = await response.json().catch(() => ({}));
-            console.error('Gemini API 錯誤:', errData);
-            return null;
-        }
-
-        const data = await response.json();
-        const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
-        return text || null;
-    } catch (error) {
-        console.error('Gemini 請求失敗:', error);
-        return null;
-    }
+    const { text, error } = await callGemini(prompt, { temperature: 0.7, maxOutputTokens: 500 });
+    if (error) console.error('Gemini 情緒分析失敗:', error);
+    return text;
 }
 
 // 主要情緒分析流程（在股票分析後自動呼叫）
@@ -1573,7 +1660,10 @@ async function runSentimentAnalysis(stockData, analysis) {
         } else if (!apiKey) {
             aiAnalysisEl.innerHTML = `<p class="news-placeholder">請設定 Gemini API Key 以啟用 AI 深度分析<br><small>（目前使用關鍵字規則判斷情緒）</small></p>`;
         } else {
-            aiAnalysisEl.innerHTML = `<p class="news-placeholder">AI 分析暫時無法取得，已使用關鍵字分析作為替代</p>`;
+            const detail = lastGeminiError
+                ? `<br><small style="color:#f87171">原因：${lastGeminiError}</small>`
+                : '';
+            aiAnalysisEl.innerHTML = `<p class="news-placeholder">AI 分析暫時無法取得，已使用關鍵字分析作為替代${detail}</p>`;
         }
 
         // 新聞列表
