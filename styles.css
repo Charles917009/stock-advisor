@@ -1399,6 +1399,117 @@ body {
     font-size: 0.8rem;
 }
 
+/* ===== 頁內提示訊息 ===== */
+.toast-container {
+    position: fixed;
+    bottom: 24px;
+    right: 24px;
+    z-index: 9999;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    max-width: min(380px, calc(100vw - 32px));
+    pointer-events: none;
+}
+
+.toast {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 14px 18px;
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--primary);
+    border-radius: var(--radius-sm);
+    box-shadow: var(--shadow-lg);
+    font-size: 0.86rem;
+    line-height: 1.6;
+    color: var(--text-secondary);
+    pointer-events: auto;
+    animation: toastIn 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.toast.leaving {
+    animation: toastOut 0.2s ease forwards;
+}
+
+.toast i {
+    margin-top: 3px;
+    flex-shrink: 0;
+}
+
+.toast.error {
+    border-left-color: var(--danger);
+}
+
+.toast.error i {
+    color: #f87171;
+}
+
+.toast.warning {
+    border-left-color: var(--warning);
+}
+
+.toast.warning i {
+    color: #fbbf24;
+}
+
+.toast.info {
+    border-left-color: var(--primary);
+}
+
+.toast.info i {
+    color: var(--primary-light);
+}
+
+.toast.success {
+    border-left-color: var(--accent);
+}
+
+.toast.success i {
+    color: #34d399;
+}
+
+.toast-message {
+    flex: 1;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.toast-close {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 0.9rem;
+    padding: 0 0 0 4px;
+    line-height: 1;
+    font-family: inherit;
+    flex-shrink: 0;
+}
+
+.toast-close:hover {
+    color: var(--text);
+}
+
+@keyframes toastIn {
+    from { opacity: 0; transform: translateY(12px) scale(0.97); }
+    to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@keyframes toastOut {
+    to { opacity: 0; transform: translateX(20px); }
+}
+
+@media (max-width: 480px) {
+    .toast-container {
+        left: 16px;
+        right: 16px;
+        bottom: 16px;
+        max-width: none;
+    }
+}
+
 /* ===== RWD 響應式 ===== */
 @media (max-width: 768px) {
     .header h1 { font-size: 1.5rem; }

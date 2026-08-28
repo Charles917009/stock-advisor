@@ -75,7 +75,8 @@ saveProxyBtn.addEventListener('click', () => {
 async function analyzeStock() {
     const symbol = stockInput.value.trim().toUpperCase();
     if (!symbol) {
-        alert('請輸入股票代號');
+        showToast('請輸入股票代號', 'warning', 4000);
+        stockInput.focus();
         return;
     }
 
@@ -88,10 +89,80 @@ async function analyzeStock() {
         displayResults(stockData, analysis);
     } catch (error) {
         console.error('分析錯誤:', error);
-        alert(`${error.message}\n\n提示：台股請輸入代號如 2330，美股請輸入如 AAPL`);
+        showToast(
+            `${error.message}\n\n提示：台股請輸入代號如 2330，美股請輸入如 AAPL`,
+            'error',
+            9000
+        );
     } finally {
         showLoading(false);
     }
+}
+
+// ===== 頁內提示訊息（取代 alert）=====
+
+const toastContainer = document.getElementById('toastContainer');
+
+const TOAST_ICONS = {
+    error: 'fa-circle-exclamation',
+    warning: 'fa-triangle-exclamation',
+    info: 'fa-circle-info',
+    success: 'fa-circle-check'
+};
+
+/**
+ * 顯示頁內提示訊息。
+ * 相較 alert()：不阻斷操作、樣式與整體設計一致、可同時顯示多則。
+ * @param {string} message 訊息內容
+ * @param {'error'|'warning'|'info'|'success'} type 訊息類型
+ * @param {number} duration 自動關閉毫秒數，0 表示不自動關閉
+ */
+function showToast(message, type = 'info', duration = 6000) {
+    if (!toastContainer) {
+        console.warn('找不到提示容器:', message);
+        return;
+    }
+
+    const toast = document.createElement('div');
+    toast.className = `toast ${type}`;
+
+    const icon = document.createElement('i');
+    icon.className = `fas ${TOAST_ICONS[type] || TOAST_ICONS.info}`;
+
+    // 用 textContent 而非 innerHTML，訊息可能包含 API 回傳的外部內容
+    const text = document.createElement('div');
+    text.className = 'toast-message';
+    text.textContent = message;
+
+    const closeBtn = document.createElement('button');
+    closeBtn.className = 'toast-close';
+    closeBtn.setAttribute('aria-label', '關閉提示');
+    closeBtn.innerHTML = '<i class="fas fa-xmark"></i>';
+
+    const dismiss = () => {
+        if (toast.classList.contains('leaving')) return;
+        toast.classList.add('leaving');
+        setTimeout(() => toast.remove(), 200);
+    };
+
+    closeBtn.addEventListener('click', dismiss);
+
+    toast.append(icon, text, closeBtn);
+    toastContainer.appendChild(toast);
+
+    if (duration > 0) {
+        setTimeout(dismiss, duration);
+    }
+}
+
+// 將外部資料（API 回傳的股票名稱等）安全地插入 HTML
+function escapeHtml(value) {
+    return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
 }
 
 // ===== Gemini API 共用邏輯 =====
@@ -1430,13 +1501,14 @@ function displayScreenerResults(results) {
         if (stock.totalScore >= 75) { recommendText = '強烈買入'; recommendClass = 'strong-buy'; }
         else if (stock.totalScore >= 60) { recommendText = '建議買入'; recommendClass = 'buy'; }
 
+        // 股票名稱與代號來自 Yahoo API，屬外部資料，一律轉義後才插入
         html += `
             <tr>
                 <td><strong>#${index + 1}</strong></td>
                 <td>
                     <div class="stock-name-cell">
-                        <span class="name">${stock.name}</span>
-                        <span class="symbol">${stock.symbol} · ${marketLabel}股</span>
+                        <span class="name">${escapeHtml(stock.name)}</span>
+                        <span class="symbol">${escapeHtml(stock.symbol)} · ${marketLabel}股</span>
                     </div>
                 </td>
                 <td>${currencySymbol}${stock.currentPrice.toFixed(2)}</td>
@@ -1447,13 +1519,21 @@ function displayScreenerResults(results) {
                 <td>${stock.techScore}</td>
                 <td>${stock.trendScore}</td>
                 <td><span class="recommend-cell ${recommendClass}">${recommendText}</span></td>
-                <td><button class="btn-detail" onclick="viewDetail('${stock.symbol}', '${stock.market}')">詳細</button></td>
+                <td><button class="btn-detail" data-symbol="${escapeHtml(stock.symbol)}" data-market="${escapeHtml(stock.market)}">詳細</button></td>
             </tr>
         `;
     });
 
     screenerTableBody.innerHTML = html;
 }
+
+// 「詳細」按鈕採事件委派，取代 inline onclick：
+// 避免把股票代號字串直接拼進 HTML 屬性造成解析錯誤或注入
+screenerTableBody.addEventListener('click', (e) => {
+    const btn = e.target.closest('.btn-detail');
+    if (!btn) return;
+    viewDetail(btn.dataset.symbol, btn.dataset.market);
+});
 
 // 查看個股詳細分析
 function viewDetail(symbol, market) {
@@ -1731,7 +1811,7 @@ async function runSentimentAnalysis(stockData, analysis) {
             aiAnalysisEl.innerHTML = `<p class="news-placeholder">請設定 Gemini API Key 以啟用 AI 深度分析<br><small>（目前使用關鍵字規則判斷情緒）</small></p>`;
         } else {
             const detail = lastGeminiError
-                ? `<br><small style="color:#f87171">原因：${lastGeminiError}</small>`
+                ? `<br><small style="color:#f87171">原因：${escapeHtml(lastGeminiError)}</small>`
                 : '';
             aiAnalysisEl.innerHTML = `<p class="news-placeholder">AI 分析暫時無法取得，已使用關鍵字分析作為替代${detail}</p>`;
         }
@@ -1743,12 +1823,14 @@ async function runSentimentAnalysis(stockData, analysis) {
                 const dotClass = item.sentiment === 'positive' ? 'positive' :
                     item.sentiment === 'negative' ? 'negative' : 'neutral-dot';
                 const date = item.pubDate ? new Date(item.pubDate).toLocaleDateString('zh-TW') : '';
+                // 新聞標題與來源取自 Google News RSS，屬未經信任的外部內容。
+                // cleanHtml() 會把 HTML 實體解碼，若直接插入等於還原成可執行標籤，因此必須轉義。
                 newsHtml += `
                     <div class="news-item">
                         <div class="news-sentiment-dot ${dotClass}"></div>
                         <div class="news-item-content">
-                            <div class="news-item-title">${item.title}</div>
-                            <div class="news-item-meta">${item.source ? item.source + ' · ' : ''}${date}</div>
+                            <div class="news-item-title">${escapeHtml(item.title)}</div>
+                            <div class="news-item-meta">${item.source ? escapeHtml(item.source) + ' · ' : ''}${escapeHtml(date)}</div>
                         </div>
                     </div>
                 `;
@@ -1763,6 +1845,6 @@ async function runSentimentAnalysis(stockData, analysis) {
     } catch (error) {
         console.error('情緒分析錯誤:', error);
         sentimentLoading.classList.add('hidden');
-        aiAnalysisEl.innerHTML = `<p class="news-placeholder">情緒分析發生錯誤：${error.message}</p>`;
+        aiAnalysisEl.innerHTML = `<p class="news-placeholder">情緒分析發生錯誤：${escapeHtml(error.message)}</p>`;
     }
 }
