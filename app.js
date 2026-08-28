@@ -166,7 +166,7 @@ async function resolveGeminiModel(apiKey) {
  * 呼叫 Gemini 產生文字。
  * @returns {Promise<{text: string|null, error: string|null}>}
  */
-async function callGemini(prompt, { temperature = 0.6, maxOutputTokens = 600 } = {}) {
+async function callGemini(prompt, { temperature = 0.6, maxOutputTokens = 2048 } = {}) {
     const apiKey = getGeminiKey();
     if (!apiKey) return { text: null, error: '未設定 API Key' };
 
@@ -177,45 +177,90 @@ async function callGemini(prompt, { temperature = 0.6, maxOutputTokens = 600 } =
     let lastError = null;
 
     for (const model of models) {
-        try {
-            const response = await fetch(
-                `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
-                {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        contents: [{ parts: [{ text: prompt }] }],
-                        generationConfig: { temperature, maxOutputTokens }
-                    })
+        // 新版模型預設開啟 thinking，推理 token 會佔用 maxOutputTokens 額度，
+        // 造成正式回答被截斷。優先嘗試關閉 thinking；
+        // 若該模型不支援這個參數（如 Gemini 3.x 改用 thinking_level），再退回預設設定。
+        const configVariants = [
+            { temperature, maxOutputTokens, thinkingConfig: { thinkingBudget: 0 } },
+            { temperature, maxOutputTokens }
+        ];
+
+        let modelMissing = false;
+        // 模型有正常回應（HTTP 200）就代表它可用，
+        // 之後即使拿不到文字也不該再換模型，避免白燒 API 配額
+        let modelResponded = false;
+
+        for (const generationConfig of configVariants) {
+            try {
+                const response = await fetch(
+                    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+                    {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            contents: [{ parts: [{ text: prompt }] }],
+                            generationConfig
+                        })
+                    }
+                );
+
+                if (!response.ok) {
+                    const errBody = await response.json().catch(() => ({}));
+                    lastError = errBody?.error?.message || `HTTP ${response.status}`;
+                    console.warn(`Gemini ${model} 失敗:`, lastError);
+
+                    // 模型不存在 → 換下一個模型
+                    if (response.status === 404) {
+                        modelMissing = true;
+                        break;
+                    }
+
+                    // thinking 參數不被支援 → 用同一模型改試下一組設定
+                    if (response.status === 400 && /thinking/i.test(lastError)) {
+                        continue;
+                    }
+
+                    // 其他錯誤（金鑰無效、額度用盡）直接回報，不必再試
+                    lastGeminiError = lastError;
+                    return { text: null, error: lastError };
                 }
-            );
 
-            if (!response.ok) {
-                const errBody = await response.json().catch(() => ({}));
-                lastError = errBody?.error?.message || `HTTP ${response.status}`;
-                console.warn(`Gemini 模型 ${model} 失敗:`, lastError);
+                modelResponded = true;
 
-                // 模型不存在才換下一個；其他錯誤（金鑰無效、額度用盡）直接回報
-                if (response.status === 404) continue;
-                lastGeminiError = lastError;
-                return { text: null, error: lastError };
+                const data = await response.json();
+                const candidate = data.candidates?.[0];
+
+                // 回應可能被切成多個 part，需全部串接
+                const text = (candidate?.content?.parts || [])
+                    .map(p => p.text || '')
+                    .join('')
+                    .trim();
+
+                if (text) {
+                    resolvedGeminiModel = model;
+                    localStorage.setItem('gemini_model', model);
+                    lastGeminiError = null;
+                    return { text, error: null };
+                }
+
+                // 沒拿到文字：若是被 token 上限截斷，改試下一組設定（關閉 thinking 可釋出額度）
+                if (candidate?.finishReason === 'MAX_TOKENS') {
+                    lastError = '回應被 token 上限截斷（thinking 佔用額度）';
+                    continue;
+                }
+
+                lastError = candidate?.finishReason
+                    ? `回應為空（finishReason: ${candidate.finishReason}）`
+                    : '回應內容為空';
+            } catch (e) {
+                lastError = e.message;
             }
-
-            const data = await response.json();
-            const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
-
-            if (text) {
-                // 記住這個可用的模型
-                resolvedGeminiModel = model;
-                localStorage.setItem('gemini_model', model);
-                lastGeminiError = null;
-                return { text, error: null };
-            }
-
-            lastError = '回應內容為空';
-        } catch (e) {
-            lastError = e.message;
         }
+
+        if (modelMissing) continue;
+
+        // 模型可用但仍拿不到內容，換模型也解決不了，直接結束
+        if (modelResponded) break;
     }
 
     lastGeminiError = lastError || '所有模型都無法使用';
@@ -1028,7 +1073,7 @@ function displayAdvice(analysis, stockData) {
         let finalHtml = '';
 
         if (aiAdvice) {
-            finalHtml += `<div class="advice-item positive" style="border-left-color: #8b5cf6; background: rgba(139, 92, 246, 0.05);"><strong>🤖 AI 投資建議：</strong><br><div style="margin-top:8px; white-space:pre-wrap;">${aiAdvice}</div></div>`;
+            finalHtml += `<div class="advice-item positive" style="border-left-color: #8b5cf6; background: rgba(139, 92, 246, 0.05);"><strong>🤖 AI 投資建議：</strong><br><div style="margin-top:8px; white-space:pre-wrap;">${formatAIText(aiAdvice)}</div></div>`;
         } else {
             // AI 失敗時退回規則建議
             if (totalScore >= 75) {
@@ -1100,12 +1145,31 @@ async function generateAIAdvice(stockData, analysis) {
 
 請簡潔有力，總字數不超過 300 字。`;
 
-    const { text, error } = await callGemini(prompt, { temperature: 0.6, maxOutputTokens: 600 });
+    const { text, error } = await callGemini(prompt, { temperature: 0.6, maxOutputTokens: 2048 });
     if (error) console.warn('AI 投資建議生成失敗:', error);
     return text;
 }
 
 // ===== 工具函數 =====
+
+// 將 AI 回傳的文字安全地轉為 HTML：
+// 先轉義所有標籤避免注入，再把常見 markdown 標記轉成樣式
+function formatAIText(text) {
+    const escaped = String(text)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+
+    return escaped
+        // **粗體**
+        .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+        // 行首的 * 或 - 項目符號
+        .replace(/^\s*[*-]\s+/gm, '• ')
+        // 【標題】加上顏色強調
+        .replace(/【([^】]+)】/g, '<strong style="color:#a78bfa">【$1】</strong>');
+}
+
 function formatVolume(vol) {
     if (vol >= 1e8) return (vol / 1e8).toFixed(2) + '億';
     if (vol >= 1e4) return (vol / 1e4).toFixed(0) + '萬';
@@ -1586,7 +1650,7 @@ ${techSummary}
 
 請簡潔有力，不要超過 200 字。`;
 
-    const { text, error } = await callGemini(prompt, { temperature: 0.7, maxOutputTokens: 500 });
+    const { text, error } = await callGemini(prompt, { temperature: 0.7, maxOutputTokens: 2048 });
     if (error) console.error('Gemini 情緒分析失敗:', error);
     return text;
 }
@@ -1656,7 +1720,7 @@ async function runSentimentAnalysis(stockData, analysis) {
 
         // AI 分析內容
         if (aiText) {
-            aiAnalysisEl.innerHTML = `<div style="white-space:pre-wrap;">${aiText}</div>`;
+            aiAnalysisEl.innerHTML = `<div style="white-space:pre-wrap;">${formatAIText(aiText)}</div>`;
         } else if (!apiKey) {
             aiAnalysisEl.innerHTML = `<p class="news-placeholder">請設定 Gemini API Key 以啟用 AI 深度分析<br><small>（目前使用關鍵字規則判斷情緒）</small></p>`;
         } else {
