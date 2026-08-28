@@ -71,9 +71,14 @@
                             </select>
                         </label>
                     </div>
-                    <button id="screenerBtn" class="btn-screener">
-                        <i class="fas fa-radar"></i> 開始篩選
-                    </button>
+                    <div class="screener-actions">
+                        <button id="screenerBtn" class="btn-screener">
+                            <i class="fas fa-magnifying-glass-chart"></i> 開始篩選
+                        </button>
+                        <button id="screenerStopBtn" class="btn-screener-stop hidden">
+                            <i class="fas fa-stop"></i> 停止
+                        </button>
+                    </div>
                 </div>
                 <!-- 篩選進度 -->
                 <div id="screenerProgress" class="screener-progress hidden">
@@ -97,8 +102,10 @@
                                     <th>現價</th>
                                     <th>漲跌幅</th>
                                     <th>綜合評分</th>
-                                    <th>技術面</th>
-                                    <th>趨勢面</th>
+                                    <th>適用策略</th>
+                                    <th>趨勢</th>
+                                    <th>動能</th>
+                                    <th>位階</th>
                                     <th>建議</th>
                                     <th>操作</th>
                                 </tr>
@@ -109,8 +116,12 @@
                     </div>
                     <div id="noResults" class="no-results hidden">
                         <i class="fas fa-search"></i>
-                        <p>目前沒有符合條件的股票，可嘗試降低評分門檻</p>
+                        <p>沒有取得任何股票資料，請確認 Proxy 設定或稍後再試</p>
                     </div>
+                    <p class="results-note">
+                        <i class="fas fa-circle-info"></i>
+                        一律列出評分前 15 名。分數後帶「·」表示未達你設定的門檻，僅供比較相對強弱。
+                    </p>
                 </div>
             </div>
         </section>
@@ -151,28 +162,29 @@
                 <div class="recommendation">
                     <div id="recommendBadge" class="recommend-badge">—</div>
                     <p id="recommendText" class="recommend-text">等待分析...</p>
+                    <div id="strategyBadge" class="strategy-badge hidden">—</div>
                 </div>
                 <div class="score-breakdown">
-                    <div class="score-item">
-                        <span class="score-item-label">技術面</span>
-                        <div class="score-bar">
-                            <div id="techBar" class="score-bar-fill" style="width: 0%"></div>
-                        </div>
-                        <span id="techScore" class="score-item-value">—</span>
-                    </div>
-                    <div class="score-item">
-                        <span class="score-item-label">基本面</span>
-                        <div class="score-bar">
-                            <div id="fundBar" class="score-bar-fill" style="width: 0%"></div>
-                        </div>
-                        <span id="fundScore" class="score-item-value">—</span>
-                    </div>
-                    <div class="score-item">
+                    <div class="score-item" title="均線結構：排列順序、股價相對 20 日均線位置、均線斜率">
                         <span class="score-item-label">趨勢面</span>
                         <div class="score-bar">
                             <div id="trendBar" class="score-bar-fill" style="width: 0%"></div>
                         </div>
                         <span id="trendScore" class="score-item-value">—</span>
+                    </div>
+                    <div class="score-item" title="震盪指標動能：RSI、MACD、KD、量能確認（數值高代表動能強）">
+                        <span class="score-item-label">動能面</span>
+                        <div class="score-bar">
+                            <div id="momentumBar" class="score-bar-fill" style="width: 0%"></div>
+                        </div>
+                        <span id="momentumScore" class="score-item-value">—</span>
+                    </div>
+                    <div class="score-item" title="價格位階：52 週位置、布林通道位置、乖離率（數值高代表位階低、進場成本較有利）">
+                        <span class="score-item-label">位階面</span>
+                        <div class="score-bar">
+                            <div id="positionBar" class="score-bar-fill" style="width: 0%"></div>
+                        </div>
+                        <span id="positionScore" class="score-item-value">—</span>
                     </div>
                 </div>
             </div>
@@ -205,10 +217,14 @@
                 </div>
             </div>
 
-            <!-- 基本面分析 -->
+            <!-- 價格位階與風險（皆為價格衍生指標，不含財報數據） -->
             <div class="fundamental-section">
-                <h3><i class="fas fa-building"></i> 基本面分析</h3>
-                <div class="fundamental-grid" id="fundamentalGrid">
+                <h3><i class="fas fa-ruler-vertical"></i> 價格位階與風險</h3>
+                <p class="section-note">
+                    <i class="fas fa-circle-info"></i>
+                    以下皆為價格與成交量衍生的指標。本系統的資料來源未提供本益比、殖利率、營收等財報數據，因此不含基本面分析。
+                </p>
+                <div class="fundamental-grid" id="positionGrid">
                     —
                 </div>
             </div>

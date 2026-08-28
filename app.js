@@ -675,10 +675,40 @@ function calculateBollinger(prices, period = 20) {
 }
 
 // ===== 綜合分析 =====
+
+function clamp(value, min = 0, max = 100) {
+    if (!Number.isFinite(value)) return (min + max) / 2;
+    return Math.max(min, Math.min(max, value));
+}
+
+/**
+ * 把偏離比例映射到 0~100。
+ * @param {number} deviation 偏離比例，例如 0.05 表示高出 5%
+ * @param {number} fullScale 對應到滿分的偏離幅度
+ * @param {boolean} inverse true 表示偏離越大分數越低
+ */
+function scaleDeviation(deviation, fullScale, inverse = false) {
+    if (!Number.isFinite(deviation)) return 50;
+    const scaled = 50 + (deviation / fullScale) * 50 * (inverse ? -1 : 1);
+    return clamp(scaled);
+}
+
+/**
+ * 綜合分析。
+ *
+ * 設計說明：舊版把「順勢」與「逆勢」訊號加總到同一個分數，
+ * 例如 RSI 超賣加分、同時跌破均線扣分，兩者必然同時發生而互相抵銷，
+ * 使絕大多數股票都落在 40~60 分而失去區隔度。
+ *
+ * 新版改為三個彼此獨立的面向，再分別組合成兩種策略評分：
+ *   趨勢面（均線結構）、動能面（震盪指標）、位階面（價格相對位置）
+ *   順勢評分 = 趨勢主導；逆勢評分 = 位階主導
+ * 總分取兩者較高者，並標明適用哪一種策略，訊號因此不再互相抵銷。
+ */
 function performAnalysis(stockData) {
     const { prices, currentPrice } = stockData;
 
-    // 技術指標計算
+    // ---- 技術指標 ----
     const ma5 = calculateMA(prices, 5);
     const ma10 = calculateMA(prices, 10);
     const ma20 = calculateMA(prices, 20);
@@ -688,188 +718,234 @@ function performAnalysis(stockData) {
     const kd = calculateKD(prices);
     const bollinger = calculateBollinger(prices);
 
-    // 最近成交量分析
-    const recentVolumes = prices.slice(-5).map(p => p.volume);
-    const avgVolume20 = prices.slice(-20).reduce((s, p) => s + p.volume, 0) / 20;
-    const currentVolume = prices[prices.length - 1].volume;
-    const volumeRatio = currentVolume / avgVolume20;
+    const last = arr => (arr.length > 0 ? arr[arr.length - 1] : null);
+    const currentMA5 = last(ma5);
+    const currentMA10 = last(ma10);
+    const currentMA20 = last(ma20);
+    const currentMA60 = last(ma60);
 
-    // 技術面評分 (0-100)
-    let techScore = 50;
-    const techSignals = [];
+    // ---- 成交量 ----
+    const volumeWindow = Math.min(20, prices.length);
+    const avgVolume20 = prices.slice(-volumeWindow).reduce((s, p) => s + (p.volume || 0), 0) / volumeWindow;
+    const currentVolume = prices[prices.length - 1].volume || 0;
+    const volumeRatio = avgVolume20 > 0 ? currentVolume / avgVolume20 : 1;
 
-    // MA 分析
-    const currentMA5 = ma5.length > 0 ? ma5[ma5.length - 1] : null;
-    const currentMA10 = ma10.length > 0 ? ma10[ma10.length - 1] : null;
-    const currentMA20 = ma20.length > 0 ? ma20[ma20.length - 1] : null;
-    const currentMA60 = ma60.length > 0 ? ma60[ma60.length - 1] : null;
+    const prevClose = prices.length >= 2 ? prices[prices.length - 2].close : currentPrice;
+    const risingToday = currentPrice >= prevClose;
 
-    if (currentMA5 && currentPrice > currentMA5) techScore += 5;
-    else techScore -= 5;
+    const signals = [];
 
-    if (currentMA20 && currentPrice > currentMA20) {
-        techScore += 10;
-        techSignals.push({ text: '股價站上 20 日均線，中期趨勢偏多', type: 'positive' });
-    } else if (currentMA20) {
-        techScore -= 10;
-        techSignals.push({ text: '股價跌破 20 日均線，中期趨勢偏空', type: 'negative' });
+    // ================= 趨勢面 =================
+    // 只看均線結構，不混入震盪指標，避免與動能面重複計算
+    const alignmentChecks = [
+        currentMA5 !== null && currentMA10 !== null ? currentMA5 > currentMA10 : null,
+        currentMA10 !== null && currentMA20 !== null ? currentMA10 > currentMA20 : null,
+        currentMA20 !== null && currentMA60 !== null ? currentMA20 > currentMA60 : null
+    ].filter(v => v !== null);
+
+    const alignmentScore = alignmentChecks.length > 0
+        ? (alignmentChecks.filter(Boolean).length / alignmentChecks.length) * 100
+        : 50;
+
+    // 股價相對 MA20 的位置：±10% 對應滿分區間
+    const ma20Deviation = currentMA20 ? currentPrice / currentMA20 - 1 : 0;
+    const priceVsMaScore = scaleDeviation(ma20Deviation, 0.10);
+
+    // MA20 斜率：與 20 天前的 MA20 相比，±8% 對應滿分區間
+    let ma20Slope = 0;
+    if (ma20.length >= 21) {
+        const past = ma20[ma20.length - 21];
+        if (past > 0) ma20Slope = ma20[ma20.length - 1] / past - 1;
+    }
+    const slopeScore = scaleDeviation(ma20Slope, 0.08);
+
+    const trendScore = clamp(alignmentScore * 0.40 + priceVsMaScore * 0.30 + slopeScore * 0.30);
+
+    if (alignmentScore >= 100) {
+        signals.push({ text: '均線呈完整多頭排列（MA5 > MA10 > MA20 > MA60）', type: 'positive' });
+    } else if (alignmentScore <= 0) {
+        signals.push({ text: '均線呈完整空頭排列，趨勢明確向下', type: 'negative' });
     }
 
-    if (currentMA60 && currentPrice > currentMA60) {
-        techScore += 8;
-    } else if (currentMA60) {
-        techScore -= 8;
+    if (currentMA20) {
+        signals.push({
+            text: `股價${ma20Deviation >= 0 ? '高於' : '低於'} 20 日均線 ${Math.abs(ma20Deviation * 100).toFixed(1)}%`,
+            type: ma20Deviation >= 0 ? 'positive' : 'negative'
+        });
     }
 
-    // RSI 分析
-    if (rsi !== null) {
-        if (rsi < 30) {
-            techScore += 15;
-            techSignals.push({ text: `RSI=${rsi.toFixed(1)}，已進入超賣區，可能反彈`, type: 'positive' });
-        } else if (rsi > 70) {
-            techScore -= 15;
-            techSignals.push({ text: `RSI=${rsi.toFixed(1)}，已進入超買區，注意回調風險`, type: 'negative' });
-        } else if (rsi >= 40 && rsi <= 60) {
-            techScore += 3;
-            techSignals.push({ text: `RSI=${rsi.toFixed(1)}，位於中性區間`, type: 'neutral' });
-        }
-    }
+    // ================= 動能面 =================
+    // 震盪指標一律當作「動能刻度」解讀（數值高＝動能強），
+    // 不在此處做超買超賣的反向判斷，反向解讀交給位階面處理
+    const rsiScore = rsi !== null ? clamp(rsi) : 50;
 
-    // MACD 分析
+    const macdScore = macd && currentPrice > 0
+        ? scaleDeviation(macd.histogram / currentPrice, 0.015)
+        : 50;
+
+    const kdScore = kd ? clamp((kd.k + kd.d) / 2) : 50;
+
+    // 量能確認：放量上漲加分，放量下跌扣分
+    const volumeScore = clamp(50 + (volumeRatio - 1) * 50 * (risingToday ? 1 : -1));
+
+    const momentumScore = clamp(
+        rsiScore * 0.30 + macdScore * 0.30 + kdScore * 0.25 + volumeScore * 0.15
+    );
+
     if (macd) {
-        if (macd.histogram > 0 && macd.macd > macd.signal) {
-            techScore += 10;
-            techSignals.push({ text: 'MACD 柱狀體為正且在信號線上方，多方動能增強', type: 'positive' });
-        } else if (macd.histogram < 0) {
-            techScore -= 10;
-            techSignals.push({ text: 'MACD 柱狀體為負，空方動能較強', type: 'negative' });
-        }
+        signals.push({
+            text: `MACD 柱狀體${macd.histogram >= 0 ? '為正，多方動能延續' : '為負，空方動能仍在'}`,
+            type: macd.histogram >= 0 ? 'positive' : 'negative'
+        });
     }
 
-    // KD 分析
-    if (kd) {
-        if (kd.k < 20 && kd.d < 20) {
-            techScore += 12;
-            techSignals.push({ text: `KD 值(${kd.k.toFixed(1)}, ${kd.d.toFixed(1)})進入超賣區，留意黃金交叉`, type: 'positive' });
-        } else if (kd.k > 80 && kd.d > 80) {
-            techScore -= 12;
-            techSignals.push({ text: `KD 值(${kd.k.toFixed(1)}, ${kd.d.toFixed(1)})進入超買區，留意死亡交叉`, type: 'negative' });
-        } else if (kd.k > kd.d) {
-            techScore += 5;
-        }
+    if (volumeRatio > 1.5) {
+        signals.push({
+            text: `成交量放大至均量 ${volumeRatio.toFixed(1)} 倍，${risingToday ? '量增價漲' : '量增價跌'}`,
+            type: risingToday ? 'positive' : 'negative'
+        });
+    } else if (volumeRatio < 0.5) {
+        signals.push({ text: `成交量僅均量 ${volumeRatio.toFixed(1)} 倍，市場參與度偏低`, type: 'neutral' });
     }
 
-    // 布林通道分析
-    if (bollinger) {
-        if (currentPrice <= bollinger.lower) {
-            techScore += 10;
-            techSignals.push({ text: '股價觸及布林通道下緣，可能出現反彈', type: 'positive' });
-        } else if (currentPrice >= bollinger.upper) {
-            techScore -= 10;
-            techSignals.push({ text: '股價觸及布林通道上緣，注意回調壓力', type: 'negative' });
-        }
-    }
+    // ================= 位階面 =================
+    // 分數高＝價格位階低（相對便宜、進場成本較有利）
+    const positionData = {};
 
-    techScore = Math.max(0, Math.min(100, techScore));
-
-    // 基本面評分（基於價格位置）
-    let fundScore = 50;
-    const fundData = {};
-
-    // 52 週高低點分析
-    if (stockData.fiftyTwoWeekHigh && stockData.fiftyTwoWeekLow) {
+    let week52Score = 50;
+    if (stockData.fiftyTwoWeekHigh && stockData.fiftyTwoWeekLow &&
+        stockData.fiftyTwoWeekHigh > stockData.fiftyTwoWeekLow) {
         const range = stockData.fiftyTwoWeekHigh - stockData.fiftyTwoWeekLow;
-        const position = (currentPrice - stockData.fiftyTwoWeekLow) / range;
-        fundData.weekPosition = (position * 100).toFixed(1);
+        const pos = (currentPrice - stockData.fiftyTwoWeekLow) / range;
+        positionData.weekPosition = (pos * 100).toFixed(1);
+        week52Score = clamp(100 - pos * 100);
+    }
 
-        if (position < 0.3) {
-            fundScore += 15;
-        } else if (position > 0.8) {
-            fundScore -= 10;
+    let bollingerScore = 50;
+    if (bollinger && bollinger.upper > bollinger.lower) {
+        const percentB = (currentPrice - bollinger.lower) / (bollinger.upper - bollinger.lower);
+        positionData.percentB = (percentB * 100).toFixed(1);
+        bollingerScore = clamp(100 - percentB * 100);
+
+        if (percentB <= 0) {
+            signals.push({ text: '股價已跌破布林通道下緣，短線超跌', type: 'positive' });
+        } else if (percentB >= 1) {
+            signals.push({ text: '股價已突破布林通道上緣，短線過熱', type: 'negative' });
         }
     }
 
-    // 計算近期波動率
-    const returns = [];
-    for (let i = 1; i < Math.min(prices.length, 21); i++) {
-        returns.push((prices[prices.length - i].close - prices[prices.length - i - 1].close) / prices[prices.length - i - 1].close);
+    // 乖離率：離均線越遠越不利進場
+    const deviationScore = scaleDeviation(ma20Deviation, 0.10, true);
+
+    // 年化波動率（母體標準差）
+    const dailyReturns = [];
+    for (let i = Math.max(1, prices.length - 20); i < prices.length; i++) {
+        const prev = prices[i - 1].close;
+        if (prev > 0) dailyReturns.push(prices[i].close / prev - 1);
     }
-    const volatility = Math.sqrt(returns.reduce((s, r) => s + r * r, 0) / returns.length) * Math.sqrt(252) * 100;
-    fundData.volatility = volatility.toFixed(1);
+    let volatility = 0;
+    if (dailyReturns.length > 1) {
+        const mean = dailyReturns.reduce((s, r) => s + r, 0) / dailyReturns.length;
+        const variance = dailyReturns.reduce((s, r) => s + (r - mean) ** 2, 0) / dailyReturns.length;
+        volatility = Math.sqrt(variance) * Math.sqrt(252) * 100;
+    }
+    positionData.volatility = volatility.toFixed(1);
 
-    if (volatility < 20) fundScore += 10;
-    else if (volatility > 40) fundScore -= 10;
+    let positionScore = week52Score * 0.40 + bollingerScore * 0.30 + deviationScore * 0.30;
 
-    // 計算近一個月漲跌幅
-    const monthAgoPrice = prices.length >= 20 ? prices[prices.length - 20].close : prices[0].close;
-    const monthReturn = ((currentPrice - monthAgoPrice) / monthAgoPrice * 100);
-    fundData.monthReturn = monthReturn.toFixed(2);
+    // 高波動時「便宜」的可信度下降，讓分數往中性收斂
+    if (volatility > 40) {
+        const confidence = clamp(1 - (volatility - 40) / 60, 0.4, 1);
+        positionScore = 50 + (positionScore - 50) * confidence;
+    }
+    positionScore = clamp(positionScore);
 
-    // 近三個月漲跌幅
-    const threeMonthAgoPrice = prices.length >= 60 ? prices[prices.length - 60].close : prices[0].close;
-    const threeMonthReturn = ((currentPrice - threeMonthAgoPrice) / threeMonthAgoPrice * 100);
-    fundData.threeMonthReturn = threeMonthReturn.toFixed(2);
+    // 報酬率（僅供顯示）
+    const monthAgo = prices.length >= 21 ? prices[prices.length - 21].close : prices[0].close;
+    positionData.monthReturn = (monthAgo > 0 ? (currentPrice / monthAgo - 1) * 100 : 0).toFixed(2);
+    const threeMonthAgo = prices.length >= 61 ? prices[prices.length - 61].close : prices[0].close;
+    positionData.threeMonthReturn = (threeMonthAgo > 0 ? (currentPrice / threeMonthAgo - 1) * 100 : 0).toFixed(2);
 
-    fundScore = Math.max(0, Math.min(100, fundScore));
+    // ================= 兩種策略評分 =================
+    // 長期趨勢是否還健全，用來判斷逆勢進場是不是在接下墜的刀
+    let ma60Slope = 0;
+    if (ma60.length >= 21) {
+        const past = ma60[ma60.length - 21];
+        if (past > 0) ma60Slope = ma60[ma60.length - 1] / past - 1;
+    }
+    const trendIntactScore = scaleDeviation(ma60Slope, 0.08);
 
-    // 趨勢面評分
-    let trendScore = 50;
+    // 每種策略只採計自身論點依賴的面向。
+    // 趨勢面與位階面在結構上互相排斥（強勢上漲必然使位階變高），
+    // 若把兩者都以正權重放進同一個公式，會再次互相抵銷而讓分數擠向中間，
+    // 因此相反的那一面只作為「有上限的扣分項」，不參與加權平均。
 
-    // 短期趨勢（5日 vs 10日均線）
-    if (currentMA5 && currentMA10 && currentMA5 > currentMA10) {
-        trendScore += 10;
-    } else {
-        trendScore -= 10;
+    // 順勢：看趨勢與動能是否同步向上
+    let trendFollowScore = trendScore * 0.55 + momentumScore * 0.45;
+
+    // 位階極高（過熱）時才扣分，最多扣 12 分
+    if (positionScore < 20) {
+        const overheat = (20 - positionScore) / 20 * 12;
+        trendFollowScore -= overheat;
+        if (positionScore < 10) {
+            signals.push({ text: '價格位階偏高，追高風險需留意', type: 'negative' });
+        }
+    }
+    trendFollowScore = clamp(trendFollowScore);
+
+    // 逆勢：看位階是否夠低、動能是否已經衰竭到位
+    let meanRevertScore = positionScore * 0.60 + (100 - momentumScore) * 0.25 + trendIntactScore * 0.15;
+    meanRevertScore = clamp(meanRevertScore);
+
+    // 長期趨勢明顯破壞時，不鼓勵逆勢承接
+    const fallingKnife = ma60Slope < -0.08;
+    if (fallingKnife) {
+        meanRevertScore = Math.min(meanRevertScore, 50);
+        signals.push({ text: '季線明顯下彎，逆勢承接風險偏高', type: 'negative' });
     }
 
-    // 中期趨勢（20日 vs 60日均線）
-    if (currentMA20 && currentMA60 && currentMA20 > currentMA60) {
-        trendScore += 15;
-    } else if (currentMA20 && currentMA60) {
-        trendScore -= 15;
-    }
+    const useTrendFollow = trendFollowScore >= meanRevertScore;
+    const totalScore = Math.round(useTrendFollow ? trendFollowScore : meanRevertScore);
+    const strategy = useTrendFollow ? 'trend' : 'revert';
 
-    // 量價配合
-    if (volumeRatio > 1.5 && currentPrice > (prices[prices.length - 2]?.close || currentPrice)) {
-        trendScore += 10;
-        techSignals.push({ text: '量增價漲，多方力道增強', type: 'positive' });
-    } else if (volumeRatio > 1.5 && currentPrice < (prices[prices.length - 2]?.close || currentPrice)) {
-        trendScore -= 10;
-        techSignals.push({ text: '量增價跌，賣壓沉重', type: 'negative' });
-    }
-
-    // 連續漲跌判斷
-    let consecutiveUp = 0;
-    let consecutiveDown = 0;
-    for (let i = prices.length - 1; i >= Math.max(0, prices.length - 5); i--) {
-        if (i > 0 && prices[i].close > prices[i - 1].close) consecutiveUp++;
-        else if (i > 0 && prices[i].close < prices[i - 1].close) consecutiveDown++;
-        else break;
-    }
-
-    if (consecutiveUp >= 3) trendScore += 5;
-    if (consecutiveDown >= 3) trendScore -= 5;
-
-    trendScore = Math.max(0, Math.min(100, trendScore));
-
-    // 綜合評分（加權平均）
-    const totalScore = Math.round(techScore * 0.4 + fundScore * 0.3 + trendScore * 0.3);
+    signals.push({
+        text: useTrendFollow
+            ? '訊號組合偏向順勢操作：跟隨既有趨勢，突破時進場'
+            : '訊號組合偏向逆勢操作：等待落底訊號確認後分批承接',
+        type: 'neutral'
+    });
 
     return {
-        techScore: Math.round(techScore),
-        fundScore: Math.round(fundScore),
+        // 三個獨立面向
         trendScore: Math.round(trendScore),
-        totalScore: totalScore,
+        momentumScore: Math.round(momentumScore),
+        positionScore: Math.round(positionScore),
+
+        // 兩種策略與總分
+        trendFollowScore: Math.round(trendFollowScore),
+        meanRevertScore: Math.round(meanRevertScore),
+        totalScore,
+        strategy,
+        strategyLabel: useTrendFollow ? '順勢' : '逆勢',
+
+        // 相容舊欄位名稱（篩選器與 AI prompt 仍在使用）
+        techScore: Math.round(momentumScore),
+        fundScore: Math.round(positionScore),
+
         indicators: {
             ma: { ma5: currentMA5, ma10: currentMA10, ma20: currentMA20, ma60: currentMA60 },
-            rsi: rsi,
-            macd: macd,
-            kd: kd,
-            bollinger: bollinger,
-            volume: { current: currentVolume, avg20: avgVolume20, ratio: volumeRatio }
+            rsi,
+            macd,
+            kd,
+            bollinger,
+            volume: { current: currentVolume, avg20: avgVolume20, ratio: volumeRatio },
+            ma20Slope,
+            ma60Slope
         },
-        fundData: fundData,
-        signals: techSignals
+
+        positionData,
+        fundData: positionData, // 相容舊欄位名稱
+        signals
     };
 }
 
@@ -897,8 +973,8 @@ function displayResults(stockData, analysis) {
     // 技術指標
     displayIndicators(stockData, analysis);
 
-    // 基本面
-    displayFundamentals(stockData, analysis);
+    // 價格位階與風險
+    displayPositionMetrics(stockData, analysis);
 
     // 先以規則式建議即時填入，AI 結果回來後再覆蓋
     displayRuleBasedAdvice(analysis);
@@ -912,7 +988,7 @@ function displayResults(stockData, analysis) {
 
 // 顯示評分
 function displayScore(analysis) {
-    const { totalScore, techScore, fundScore, trendScore } = analysis;
+    const { totalScore, trendScore, momentumScore, positionScore } = analysis;
 
     // 圓圈動畫
     const circumference = 2 * Math.PI * 54; // r=54
@@ -950,14 +1026,27 @@ function displayScore(analysis) {
         text.textContent = '多項指標偏空，建議減碼或停損';
     }
 
-    // 分項評分
-    document.getElementById('techScore').textContent = techScore;
-    document.getElementById('fundScore').textContent = fundScore;
-    document.getElementById('trendScore').textContent = trendScore;
+    // 適用策略：說明這個分數是由順勢還是逆勢邏輯勝出
+    const strategyBadge = document.getElementById('strategyBadge');
+    if (analysis.strategyLabel) {
+        const isTrend = analysis.strategy === 'trend';
+        strategyBadge.classList.remove('hidden');
+        strategyBadge.className = `strategy-badge ${isTrend ? 'trend' : 'revert'}`;
+        strategyBadge.innerHTML = `<i class="fas ${isTrend ? 'fa-arrow-trend-up' : 'fa-arrows-rotate'}"></i> `
+            + `適用${escapeHtml(analysis.strategyLabel)}策略`
+            + `<small>順勢 ${analysis.trendFollowScore} / 逆勢 ${analysis.meanRevertScore}</small>`;
+    } else {
+        strategyBadge.classList.add('hidden');
+    }
 
-    document.getElementById('techBar').style.width = `${techScore}%`;
-    document.getElementById('fundBar').style.width = `${fundScore}%`;
+    // 分項評分
+    document.getElementById('trendScore').textContent = trendScore;
+    document.getElementById('momentumScore').textContent = momentumScore;
+    document.getElementById('positionScore').textContent = positionScore;
+
     document.getElementById('trendBar').style.width = `${trendScore}%`;
+    document.getElementById('momentumBar').style.width = `${momentumScore}%`;
+    document.getElementById('positionBar').style.width = `${positionScore}%`;
 }
 
 // 顯示技術指標
@@ -1128,10 +1217,10 @@ function displayIndicators(stockData, analysis) {
     }
 }
 
-// 顯示基本面
-function displayFundamentals(stockData, analysis) {
-    const grid = document.getElementById('fundamentalGrid');
-    const { fundData } = analysis;
+// 顯示價格位階與風險指標（全部由價格與成交量推導，不含財報數據）
+function displayPositionMetrics(stockData, analysis) {
+    const grid = document.getElementById('positionGrid');
+    const fundData = analysis.positionData;
     const currencySymbol = stockData.currency === 'TWD' ? 'NT$' : '$';
 
     let html = `
@@ -1172,6 +1261,19 @@ function displayFundamentals(stockData, analysis) {
                 <div class="fund-value">${fundData.weekPosition}%</div>
                 <div class="fund-note ${parseFloat(fundData.weekPosition) < 30 ? 'good' : parseFloat(fundData.weekPosition) > 70 ? 'warning' : ''}">
                     ${parseFloat(fundData.weekPosition) < 30 ? '相對低檔' : parseFloat(fundData.weekPosition) > 70 ? '相對高檔' : '中間位置'}
+                </div>
+            </div>
+        `;
+    }
+
+    if (fundData.percentB) {
+        const pb = parseFloat(fundData.percentB);
+        html += `
+            <div class="fund-item">
+                <div class="fund-label">布林通道位置</div>
+                <div class="fund-value">${fundData.percentB}%</div>
+                <div class="fund-note ${pb < 20 ? 'good' : pb > 80 ? 'warning' : ''}">
+                    ${pb < 0 ? '跌破下軌' : pb < 20 ? '接近下軌' : pb > 100 ? '突破上軌' : pb > 80 ? '接近上軌' : '通道中段'}
                 </div>
             </div>
         `;
@@ -1516,6 +1618,7 @@ async function getStockList(market) {
 // 篩選器狀態
 let screenerMarket = 'tw';
 let isScreening = false;
+let screenerAborted = false;
 
 // 篩選器 DOM 元素
 const screenerBtn = document.getElementById('screenerBtn');
@@ -1528,6 +1631,16 @@ const resultCount = document.getElementById('resultCount');
 const noResults = document.getElementById('noResults');
 const screenerMarketBtns = document.querySelectorAll('.screener-toggle-btn');
 const minScoreFilter = document.getElementById('minScoreFilter');
+const screenerStopBtn = document.getElementById('screenerStopBtn');
+
+if (screenerStopBtn) {
+    screenerStopBtn.addEventListener('click', () => {
+        if (!isScreening) return;
+        screenerAborted = true;
+        screenerStopBtn.disabled = true;
+        screenerStopBtn.innerHTML = '<i class="fas fa-hourglass-half"></i> 正在停止';
+    });
+}
 
 // 篩選器事件綁定
 screenerMarketBtns.forEach(btn => {
@@ -1552,14 +1665,28 @@ async function startScreening() {
     progressBar.style.width = '0%';
     progressText.textContent = '正在取得即時熱門股票...';
 
+    screenerAborted = false;
+    if (screenerStopBtn) {
+        screenerStopBtn.classList.remove('hidden');
+        screenerStopBtn.disabled = false;
+        screenerStopBtn.innerHTML = '<i class="fas fa-stop"></i> 停止';
+    }
+
     // 取得即時熱門清單
     const stocksToScan = await getStockList(screenerMarket);
 
     const totalStocks = stocksToScan.length;
     const results = [];
     const minScore = parseInt(minScoreFilter.value);
+    let failed = 0;
 
     for (let i = 0; i < totalStocks; i++) {
+        // 使用者按下停止就立刻收工，已掃到的結果照樣呈現
+        if (screenerAborted) {
+            progressText.textContent = '已中斷掃描';
+            break;
+        }
+
         const stock = stocksToScan[i];
         const progress = ((i + 1) / totalStocks * 100).toFixed(0);
         progressBar.style.width = `${progress}%`;
@@ -1569,26 +1696,30 @@ async function startScreening() {
             const stockData = await fetchStockData(stock.symbol, stock.market);
             const analysis = performAnalysis(stockData);
 
-            if (analysis.totalScore >= minScore) {
-                results.push({
-                    symbol: stock.symbol,
-                    name: stock.name || stockData.name,
-                    market: stock.market,
-                    currentPrice: stockData.currentPrice,
-                    previousClose: stockData.previousClose,
-                    currency: stockData.currency,
-                    totalScore: analysis.totalScore,
-                    techScore: analysis.techScore,
-                    trendScore: analysis.trendScore,
-                    fundScore: analysis.fundScore
-                });
-            }
+            // 全部收集，不在此處過濾。門檻只用於標示是否達標，
+            // 避免完全沒有股票達標時畫面空白、看不出相對強弱
+            results.push({
+                symbol: stock.symbol,
+                name: stock.name || stockData.name,
+                market: stock.market,
+                currentPrice: stockData.currentPrice,
+                previousClose: stockData.previousClose,
+                currency: stockData.currency,
+                totalScore: analysis.totalScore,
+                trendScore: analysis.trendScore,
+                momentumScore: analysis.momentumScore,
+                positionScore: analysis.positionScore,
+                strategyLabel: analysis.strategyLabel,
+                strategy: analysis.strategy,
+                meetsThreshold: analysis.totalScore >= minScore
+            });
         } catch (error) {
+            failed++;
             console.warn(`掃描 ${stock.symbol} 失敗:`, error.message);
         }
 
         // 避免 API 限流，加入延遲
-        if (i < totalStocks - 1) {
+        if (i < totalStocks - 1 && !screenerAborted) {
             await delay(300);
         }
     }
@@ -1596,45 +1727,56 @@ async function startScreening() {
     // 按綜合評分排序
     results.sort((a, b) => b.totalScore - a.totalScore);
 
-    // 顯示結果
-    displayScreenerResults(results);
+    displayScreenerResults(results, { minScore, aborted: screenerAborted, failed });
+
+    if (failed > 0) {
+        showToast(`有 ${failed} 檔股票資料取得失敗，已從結果中略過。`, 'warning', 6000);
+    }
 
     // 恢復按鈕
     isScreening = false;
+    screenerAborted = false;
     screenerBtn.disabled = false;
-    screenerBtn.innerHTML = '<i class="fas fa-radar"></i> 開始篩選';
+    screenerBtn.innerHTML = '<i class="fas fa-magnifying-glass-chart"></i> 開始篩選';
+    if (screenerStopBtn) screenerStopBtn.classList.add('hidden');
     screenerProgress.classList.add('hidden');
 }
 
 // 顯示篩選結果
-function displayScreenerResults(results) {
+function displayScreenerResults(results, { minScore = 60, aborted = false, failed = 0 } = {}) {
     screenerResults.classList.remove('hidden');
+
+    const tableWrapper = document.querySelector('.results-table-wrapper');
 
     if (results.length === 0) {
         noResults.classList.remove('hidden');
         screenerTableBody.innerHTML = '';
-        resultCount.textContent = '0 檔符合';
-        document.querySelector('.results-table-wrapper').style.display = 'none';
+        resultCount.textContent = '無資料';
+        tableWrapper.style.display = 'none';
         return;
     }
 
     noResults.classList.add('hidden');
-    document.querySelector('.results-table-wrapper').style.display = 'block';
-    resultCount.textContent = `${results.length} 檔符合`;
+    tableWrapper.style.display = 'block';
+
+    const qualified = results.filter(s => s.meetsThreshold).length;
+    resultCount.textContent = `${qualified} / ${results.length} 檔達 ${minScore} 分`
+        + (aborted ? '（已中斷）' : '');
+
+    // 一律顯示排名前 15 名，即使未達門檻也能看出相對強弱
+    const shown = results.slice(0, 15);
 
     let html = '';
-    results.forEach((stock, index) => {
+    shown.forEach((stock, index) => {
         const change = stock.currentPrice - stock.previousClose;
-        const changePercent = (change / stock.previousClose * 100);
+        const changePercent = stock.previousClose > 0 ? (change / stock.previousClose * 100) : 0;
         const currencySymbol = stock.currency === 'TWD' ? 'NT$' : '$';
         const marketLabel = stock.market === 'tw' ? '台' : '美';
 
-        // 評分等級樣式
         let scoreClass = 'low';
         if (stock.totalScore >= 70) scoreClass = 'high';
         else if (stock.totalScore >= 60) scoreClass = 'medium';
 
-        // 建議等級
         let recommendText = '觀望';
         let recommendClass = 'hold';
         if (stock.totalScore >= 75) { recommendText = '強烈買入'; recommendClass = 'strong-buy'; }
@@ -1642,7 +1784,7 @@ function displayScreenerResults(results) {
 
         // 股票名稱與代號來自 Yahoo API，屬外部資料，一律轉義後才插入
         html += `
-            <tr>
+            <tr class="${stock.meetsThreshold ? 'qualified' : 'below-threshold'}">
                 <td><strong>#${index + 1}</strong></td>
                 <td>
                     <div class="stock-name-cell">
@@ -1654,9 +1796,13 @@ function displayScreenerResults(results) {
                 <td class="change-cell ${change >= 0 ? 'up' : 'down'}">
                     ${change >= 0 ? '+' : ''}${changePercent.toFixed(2)}%
                 </td>
-                <td class="score-cell ${scoreClass}">${stock.totalScore}</td>
-                <td>${stock.techScore}</td>
+                <td class="score-cell ${scoreClass}">
+                    ${stock.totalScore}${stock.meetsThreshold ? '' : ' <span class="below-mark" title="未達設定門檻">·</span>'}
+                </td>
+                <td><span class="strategy-tag ${stock.strategy === 'trend' ? 'trend' : 'revert'}">${escapeHtml(stock.strategyLabel || '—')}</span></td>
                 <td>${stock.trendScore}</td>
+                <td>${stock.momentumScore}</td>
+                <td>${stock.positionScore}</td>
                 <td><span class="recommend-cell ${recommendClass}">${recommendText}</span></td>
                 <td><button class="btn-detail" data-symbol="${escapeHtml(stock.symbol)}" data-market="${escapeHtml(stock.market)}">詳細</button></td>
             </tr>
