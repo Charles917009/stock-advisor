@@ -88,7 +88,7 @@ async function analyzeStock() {
         displayResults(stockData, analysis);
     } catch (error) {
         console.error('分析錯誤:', error);
-        alert('無法取得股票數據，請確認股票代號是否正確。\n\n提示：台股請輸入代號如 2330，美股請輸入如 AAPL');
+        alert(`${error.message}\n\n提示：台股請輸入代號如 2330，美股請輸入如 AAPL`);
     } finally {
         showLoading(false);
     }
@@ -1007,7 +1007,11 @@ function formatVolume(vol) {
 
 function showLoading(show) {
     loading.classList.toggle('hidden', !show);
-    resultSection.classList.add('hidden');
+    // 只在開始載入時隱藏結果區塊；載入結束時不可隱藏，
+    // 否則會蓋掉 displayResults() 剛顯示出來的內容
+    if (show) {
+        resultSection.classList.add('hidden');
+    }
 }
 
 
