@@ -1018,6 +1018,15 @@ body {
     color: var(--text-muted);
 }
 
+.news-trusted {
+    color: #34d399;
+    margin-right: 4px;
+}
+
+.news-trusted i {
+    font-size: 0.7rem;
+}
+
 .news-placeholder {
     color: var(--text-muted);
     font-size: 0.84rem;

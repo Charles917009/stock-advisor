@@ -2587,6 +2587,40 @@ function fetchNews(stockName, symbol, market) {
         () => fetchNewsUncached(stockName, symbol, market));
 }
 
+// 可信新聞來源（關鍵字比對，不分大小寫）。命中者優先採用。
+const NEWS_TRUSTED_SOURCES = [
+    // 台灣財經媒體
+    '鉅亨', 'anue', '經濟日報', '工商時報', '中時', '聯合新聞', 'udn', '自由財經',
+    '財訊', '天下', '商業周刊', '今周刊', 'moneydj', 'money dj', '風傳媒',
+    '中央社', 'cna', '公視', '三立', 'ettoday', 'yahoo奇摩股市', '科技新報',
+    // 國際財經媒體
+    'reuters', 'bloomberg', 'cnbc', 'wall street journal', 'wsj', 'financial times',
+    'ft.com', 'marketwatch', 'barron', 'forbes', 'the motley fool', 'motley fool',
+    'seeking alpha', 'yahoo finance', 'associated press', 'ap news', 'cnn',
+    'the wall street', 'investopedia', 'morningstar', 'zacks', 'benzinga',
+    'business insider', 'the guardian', 'nikkei'
+];
+
+// 已知內容農場／低品質來源，一律排除
+const NEWS_BLOCKED_SOURCES = [
+    'tradingkey', 'simplywall', 'simply wall', 'insider monkey', 'gurufocus',
+    'stocktitan', 'stock titan', 'tipranks', 'investing.com', 'markets insider',
+    'defense world', 'defenseworld', 'marketbeat', 'etf daily', 'financhq',
+    'khodrobin', 'the coin republic', 'coinspeaker', 'newsbtc'
+];
+
+function matchesSource(source, list) {
+    const s = (source || '').toLowerCase();
+    return list.some(k => s.includes(k.toLowerCase()));
+}
+
+// 判斷新聞來源等級：2=可信、1=一般（未知但非農場）、0=封鎖
+function sourceTier(source) {
+    if (matchesSource(source, NEWS_BLOCKED_SOURCES)) return 0;
+    if (matchesSource(source, NEWS_TRUSTED_SOURCES)) return 2;
+    return 1;
+}
+
 async function fetchNewsUncached(stockName, symbol, market) {
     const query = market === 'tw'
         ? `${stockName} 股票`
@@ -2606,12 +2640,18 @@ async function fetchNewsUncached(stockName, symbol, market) {
             if (!response.ok) continue;
             const data = await response.json();
             if (data.status === 'ok' && data.items && data.items.length > 0) {
-                return data.items.slice(0, 8).map(item => ({
-                    title: cleanHtml(item.title),
-                    link: item.link,
-                    pubDate: item.pubDate,
-                    source: item.author || extractSource(item.title)
-                }));
+                // 多取一些（最多 25 筆）再依來源品質篩選
+                const items = data.items.slice(0, 25).map(item => {
+                    const source = item.author || extractSource(item.title);
+                    return {
+                        title: cleanHtml(item.title),
+                        link: item.link,
+                        pubDate: item.pubDate,
+                        source,
+                        tier: sourceTier(source)
+                    };
+                });
+                return selectQualityNews(items);
             }
         } catch (e) {
             console.warn('RSS 取得失敗，嘗試下一個:', e.message);
@@ -2620,6 +2660,25 @@ async function fetchNewsUncached(stockName, symbol, market) {
 
     // 如果 RSS 都失敗，返回模擬新聞提示
     return null;
+}
+
+/**
+ * 依來源品質挑選新聞。
+ * 先排除農場（tier 0），再以「可信優先、其次一般」排序取前 8 則。
+ * 若過濾後完全沒有新聞（例如全被封鎖），退而保留非農場的原始順序，
+ * 避免情緒分析完全沒有素材。
+ */
+function selectQualityNews(items) {
+    const allowed = items.filter(it => it.tier > 0);
+    const pool = allowed.length > 0 ? allowed : items;
+
+    // 穩定排序：tier 高者在前，同 tier 維持原本（Google 已按相關性/時間排序）
+    const ranked = pool
+        .map((it, idx) => ({ it, idx }))
+        .sort((a, b) => (b.it.tier - a.it.tier) || (a.idx - b.idx))
+        .map(x => x.it);
+
+    return ranked.slice(0, 8);
 }
 
 // 清除 HTML 標籤
@@ -2784,12 +2843,15 @@ async function runAIAnalysis(stockData, analysis) {
                 const date = item.pubDate ? new Date(item.pubDate).toLocaleDateString('zh-TW') : '';
                 // 新聞標題與來源取自 Google News RSS，屬未經信任的外部內容。
                 // cleanHtml() 會把 HTML 實體解碼，若直接插入等於還原成可執行標籤，因此必須轉義。
+                const trusted = item.tier === 2
+                    ? '<span class="news-trusted" title="可信財經來源"><i class="fas fa-circle-check"></i></span>'
+                    : '';
                 newsHtml += `
                     <div class="news-item">
                         <div class="news-sentiment-dot ${dotClass}"></div>
                         <div class="news-item-content">
                             <div class="news-item-title">${escapeHtml(item.title)}</div>
-                            <div class="news-item-meta">${item.source ? escapeHtml(item.source) + ' · ' : ''}${escapeHtml(date)}</div>
+                            <div class="news-item-meta">${trusted}${item.source ? escapeHtml(item.source) + ' · ' : ''}${escapeHtml(date)}</div>
                         </div>
                     </div>
                 `;
