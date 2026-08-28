@@ -71,50 +71,64 @@ async function fetchStockData(symbol, market) {
 
     // 嘗試多個 Yahoo Finance endpoint
     const yahooUrls = [
-        `https://query1.finance.yahoo.com/v8/finance/chart/${tickerSymbol}?period1=${startDate}&period2=${endDate}&interval=1d`,
-        `https://query2.finance.yahoo.com/v8/finance/chart/${tickerSymbol}?period1=${startDate}&period2=${endDate}&interval=1d`
-    ];
-
-    // CORS proxy 服務列表
-    const proxyTemplates = [
-        (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
-        (url) => `https://corsproxy.io/?url=${encodeURIComponent(url)}`,
-        (url) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
-        (url) => `https://proxy.cors.sh/${url}`
+        `https://query1.finance.yahoo.com/v8/finance/chart/${tickerSymbol}?period1=${startDate}&period2=${endDate}&interval=1d&includePrePost=false`,
+        `https://query2.finance.yahoo.com/v8/finance/chart/${tickerSymbol}?period1=${startDate}&period2=${endDate}&interval=1d&includePrePost=false`
     ];
 
     let data = null;
 
-    // 逐一嘗試每個 proxy + 每個 endpoint 的組合
+    // 方法1：透過 allorigins (包裝成 JSON 模式，更穩定)
     for (const yahooUrl of yahooUrls) {
-        for (const makeProxy of proxyTemplates) {
-            const proxyUrl = makeProxy(yahooUrl);
-            try {
-                const response = await fetch(proxyUrl, {
-                    headers: {
-                        'Accept': 'application/json',
-                        'x-cors-api-key': 'temp_' // 某些 proxy 需要
-                    }
-                });
-                if (!response.ok) continue;
-
-                const text = await response.text();
-                try {
-                    data = JSON.parse(text);
-                } catch {
-                    continue;
-                }
-
-                if (data.chart && data.chart.result) break;
-                data = null;
-            } catch (e) {
-                continue;
-            }
-        }
         if (data) break;
+        try {
+            const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(yahooUrl)}`;
+            const response = await fetch(proxyUrl);
+            if (response.ok) {
+                const wrapper = await response.json();
+                if (wrapper.contents) {
+                    data = JSON.parse(wrapper.contents);
+                    if (data.chart && data.chart.result) break;
+                    data = null;
+                }
+            }
+        } catch (e) {
+            data = null;
+        }
     }
 
-    // 最後嘗試直接呼叫（本機 / Live Server 環境可能成功）
+    // 方法2：透過 corsproxy.io
+    if (!data) {
+        for (const yahooUrl of yahooUrls) {
+            if (data) break;
+            try {
+                const response = await fetch(`https://corsproxy.io/?${encodeURIComponent(yahooUrl)}`);
+                if (response.ok) {
+                    data = await response.json();
+                    if (!(data.chart && data.chart.result)) data = null;
+                }
+            } catch (e) {
+                data = null;
+            }
+        }
+    }
+
+    // 方法3：透過 thingproxy
+    if (!data) {
+        for (const yahooUrl of yahooUrls) {
+            if (data) break;
+            try {
+                const response = await fetch(`https://thingproxy.freeboard.io/fetch/${yahooUrl}`);
+                if (response.ok) {
+                    data = await response.json();
+                    if (!(data.chart && data.chart.result)) data = null;
+                }
+            } catch (e) {
+                data = null;
+            }
+        }
+    }
+
+    // 方法4：直接呼叫（本機環境）
     if (!data) {
         for (const yahooUrl of yahooUrls) {
             try {
@@ -122,9 +136,10 @@ async function fetchStockData(symbol, market) {
                 if (response.ok) {
                     data = await response.json();
                     if (data.chart && data.chart.result) break;
+                    data = null;
                 }
             } catch (e) {
-                continue;
+                data = null;
             }
         }
     }
