@@ -622,26 +622,27 @@ async function fetchFmpFundamentals(symbol) {
         eps: null, marketCap: null
     };
 
-    // quote：PE、EPS、市值
+    // quote：市值（此端點不含本益比/EPS，那些在 ratios-ttm）
     const quoteUrl = `https://financialmodelingprep.com/stable/quote?symbol=${encodeURIComponent(symbol)}&apikey=${encodeURIComponent(key)}`;
     const quote = await fetchJsonViaOwnProxy(quoteUrl);
     const q = Array.isArray(quote) ? quote[0] : quote;
     if (q) {
-        result.per = pickNumber(q, ['pe', 'peRatio', 'priceEarningsRatio']);
-        result.eps = pickNumber(q, ['eps', 'epsTTM']);
         result.marketCap = pickNumber(q, ['marketCap', 'marketCapitalization']);
     }
 
-    // ratios-ttm：殖利率、股價淨值比
+    // ratios-ttm：本益比、股價淨值比、殖利率、每股盈餘
+    // 欄位名稱依 FMP stable API 實際回應（已用真實金鑰驗證）
     const ratioUrl = `https://financialmodelingprep.com/stable/ratios-ttm?symbol=${encodeURIComponent(symbol)}&apikey=${encodeURIComponent(key)}`;
     const ratios = await fetchJsonViaOwnProxy(ratioUrl);
     const r = Array.isArray(ratios) ? ratios[0] : ratios;
     if (r) {
-        let dy = pickNumber(r, ['dividendYieldTTM', 'dividendYielPercentageTTM', 'dividendYieldPercentageTTM']);
-        // FMP 的殖利率有時是比例(0.005)有時是百分比(0.5)，統一成百分比
+        result.per = pickNumber(r, ['priceToEarningsRatioTTM', 'peRatioTTM']);
+        result.pbr = pickNumber(r, ['priceToBookRatioTTM', 'pbRatioTTM']);
+        result.eps = pickNumber(r, ['netIncomePerShareTTM', 'epsTTM']);
+        // dividendYieldTTM 為比例（0.0034 表示 0.34%），統一乘 100 轉百分比
+        let dy = pickNumber(r, ['dividendYieldTTM', 'dividendYieldPercentageTTM']);
         if (dy !== null && dy < 1) dy *= 100;
         result.dividendYield = dy;
-        result.pbr = pickNumber(r, ['priceToBookRatioTTM', 'pbRatioTTM', 'priceBookValueRatioTTM']);
     }
 
     const hasAny = result.per !== null || result.dividendYield !== null || result.pbr !== null;
