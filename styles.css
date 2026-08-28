@@ -1399,6 +1399,54 @@ body {
     font-size: 0.8rem;
 }
 
+/* ===== AI 投資建議分段呈現 ===== */
+.ai-advice-row {
+    display: flex;
+    gap: 12px;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--border-light);
+}
+
+.ai-advice-row:last-child {
+    border-bottom: none;
+}
+
+.ai-advice-key {
+    flex-shrink: 0;
+    width: 88px;
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: #a78bfa;
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    padding-top: 2px;
+}
+
+.ai-advice-key i {
+    font-size: 0.75rem;
+    margin-top: 3px;
+}
+
+.ai-advice-val {
+    flex: 1;
+    font-size: 0.88rem;
+    line-height: 1.75;
+    color: var(--text-secondary);
+    white-space: pre-wrap;
+}
+
+@media (max-width: 560px) {
+    .ai-advice-row {
+        flex-direction: column;
+        gap: 4px;
+    }
+
+    .ai-advice-key {
+        width: auto;
+    }
+}
+
 /* ===== 頁內提示訊息 ===== */
 .toast-container {
     position: fixed;

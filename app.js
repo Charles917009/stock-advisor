@@ -344,6 +344,71 @@ async function callGemini(prompt, { temperature = 0.6, maxOutputTokens = 2048 } 
     return { text: null, error: lastGeminiError };
 }
 
+// ===== 快取層 =====
+
+/**
+ * 簡易 TTL 快取。
+ * 目的：同一檔股票重複檢視（例如從篩選結果點「詳細」）不必重打 API。
+ * Gemini 免費額度每分鐘僅 15 次，重複請求很容易觸發限流。
+ */
+const cacheStore = new Map();
+
+const CACHE_TTL = {
+    stock: 5 * 60 * 1000,   // 股價 5 分鐘
+    news: 15 * 60 * 1000,   // 新聞 15 分鐘
+    ai: 30 * 60 * 1000,     // AI 研判 30 分鐘
+    trending: 10 * 60 * 1000 // 熱門排行 10 分鐘
+};
+
+function cacheGet(key) {
+    const entry = cacheStore.get(key);
+    if (!entry) return null;
+    if (Date.now() > entry.expiresAt) {
+        cacheStore.delete(key);
+        return null;
+    }
+    return entry.value;
+}
+
+function cacheSet(key, value, ttl) {
+    cacheStore.set(key, { value, expiresAt: Date.now() + ttl });
+}
+
+/**
+ * 取快取，沒有才執行 producer。
+ * 同時做「請求去重」：若同一個 key 正在請求中，共用同一個 Promise，
+ * 避免連續點擊造成重複打 API。
+ */
+const inflightRequests = new Map();
+
+async function cached(key, ttl, producer) {
+    const hit = cacheGet(key);
+    if (hit !== null) {
+        console.log('快取命中:', key);
+        return hit;
+    }
+
+    if (inflightRequests.has(key)) {
+        console.log('共用進行中的請求:', key);
+        return inflightRequests.get(key);
+    }
+
+    const promise = (async () => {
+        try {
+            const value = await producer();
+            if (value !== null && value !== undefined) {
+                cacheSet(key, value, ttl);
+            }
+            return value;
+        } finally {
+            inflightRequests.delete(key);
+        }
+    })();
+
+    inflightRequests.set(key, promise);
+    return promise;
+}
+
 // ===== Proxy 設定 =====
 
 // 取得使用者自訂的 Proxy 網址
@@ -410,7 +475,14 @@ async function fetchJsonViaProxy(targetUrl) {
 }
 
 // ===== 數據獲取 =====
-async function fetchStockData(symbol, market) {
+
+// 對外入口：優先取快取，避免同一檔股票短時間內重複請求
+function fetchStockData(symbol, market) {
+    return cached(`stock:${market}:${symbol}`, CACHE_TTL.stock,
+        () => fetchStockDataUncached(symbol, market));
+}
+
+async function fetchStockDataUncached(symbol, market) {
     const tickerSymbol = market === 'tw' ? `${symbol}.TW` : symbol;
 
     // 使用 Yahoo Finance Chart API 獲取歷史數據
@@ -828,11 +900,11 @@ function displayResults(stockData, analysis) {
     // 基本面
     displayFundamentals(stockData, analysis);
 
-    // 買入建議（AI）
-    displayAdvice(analysis, stockData);
+    // 先以規則式建議即時填入，AI 結果回來後再覆蓋
+    displayRuleBasedAdvice(analysis);
 
-    // AI 新聞情緒分析
-    runSentimentAnalysis(stockData, analysis);
+    // AI 分析：抓新聞 + 單次 Gemini 呼叫，同時更新情緒區與建議區
+    runAIAnalysis(stockData, analysis);
 
     // 捲動到結果
     resultSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -1131,100 +1203,162 @@ function displayFundamentals(stockData, analysis) {
 }
 
 // 顯示買入建議
-function displayAdvice(analysis, stockData) {
+// 規則式建議：不需 API，分析完立即顯示，AI 結果回來後才覆蓋
+function displayRuleBasedAdvice(analysis, { pending = true } = {}) {
     const adviceContent = document.getElementById('adviceContent');
     const { signals, totalScore } = analysis;
 
-    // 先顯示基礎建議（即時呈現）
-    let html = '<div class="advice-item neutral" style="border-left-color: var(--primary);"><i class="fas fa-spinner fa-spin"></i> AI 正在生成投資建議...</div>';
+    let html = '';
 
-    // 個別訊號先顯示
+    if (pending && getGeminiKey()) {
+        html += '<div class="advice-item neutral" style="border-left-color: var(--primary);"><i class="fas fa-spinner fa-spin"></i> AI 正在生成投資建議...</div>';
+    }
+
+    if (totalScore >= 75) {
+        html += `<div class="advice-item positive"><strong>📈 總結：</strong>綜合評分 ${totalScore} 分，多項技術指標呈現看漲訊號，建議積極買入。可考慮在回調時分批進場。</div>`;
+    } else if (totalScore >= 60) {
+        html += `<div class="advice-item positive"><strong>📈 總結：</strong>綜合評分 ${totalScore} 分，整體偏多，建議可以開始關注並小量布局，等待更明確的買入訊號。</div>`;
+    } else if (totalScore >= 40) {
+        html += `<div class="advice-item neutral"><strong>⚖️ 總結：</strong>綜合評分 ${totalScore} 分，多空不明，建議觀望為主。若已持有可續抱，但不建議此時加碼。</div>`;
+    } else {
+        html += `<div class="advice-item negative"><strong>📉 總結：</strong>綜合評分 ${totalScore} 分，多項指標偏空，建議謹慎操作。若已持有可考慮減碼，等待止穩訊號。</div>`;
+    }
+
     signals.forEach(signal => {
-        html += `<div class="advice-item ${signal.type}">• ${signal.text}</div>`;
+        html += `<div class="advice-item ${signal.type}">• ${escapeHtml(signal.text)}</div>`;
     });
 
     adviceContent.innerHTML = html;
-
-    // 呼叫 Gemini 產生 AI 投資建議
-    generateAIAdvice(stockData, analysis).then(aiAdvice => {
-        let finalHtml = '';
-
-        if (aiAdvice) {
-            finalHtml += `<div class="advice-item positive" style="border-left-color: #8b5cf6; background: rgba(139, 92, 246, 0.05);"><strong>🤖 AI 投資建議：</strong><br><div style="margin-top:8px; white-space:pre-wrap;">${formatAIText(aiAdvice)}</div></div>`;
-        } else {
-            // AI 失敗時退回規則建議
-            if (totalScore >= 75) {
-                finalHtml += `<div class="advice-item positive"><strong>📈 總結：</strong>綜合評分 ${totalScore} 分，多項技術指標呈現看漲訊號，建議積極買入。可考慮在回調時分批進場。</div>`;
-            } else if (totalScore >= 60) {
-                finalHtml += `<div class="advice-item positive"><strong>📈 總結：</strong>綜合評分 ${totalScore} 分，整體偏多，建議可以開始關注並小量布局，等待更明確的買入訊號。</div>`;
-            } else if (totalScore >= 40) {
-                finalHtml += `<div class="advice-item neutral"><strong>⚖️ 總結：</strong>綜合評分 ${totalScore} 分，多空不明，建議觀望為主。若已持有可續抱，但不建議此時加碼。</div>`;
-            } else {
-                finalHtml += `<div class="advice-item negative"><strong>📉 總結：</strong>綜合評分 ${totalScore} 分，多項指標偏空，建議謹慎操作。若已持有可考慮減碼，等待止穩訊號。</div>`;
-            }
-
-            finalHtml += '<div class="advice-item neutral" style="border-left-color: var(--primary);"><strong>💡 操作建議：</strong>';
-            if (totalScore >= 60) {
-                finalHtml += '建議分批買入，設定停損點在近期支撐位下方 3-5%。可搭配量能觀察確認突破有效性。';
-            } else if (totalScore >= 40) {
-                finalHtml += '建議等待 KD 或 MACD 出現明確的黃金交叉訊號再進場。目前可先將該股加入觀察名單。';
-            } else {
-                finalHtml += '建議暫時觀望，等待技術指標出現底部反轉訊號（如 RSI 跌入超賣區後回升、KD 黃金交叉）再考慮進場。';
-            }
-            finalHtml += '</div>';
-        }
-
-        // 加入個別訊號
-        signals.forEach(signal => {
-            finalHtml += `<div class="advice-item ${signal.type}">• ${signal.text}</div>`;
-        });
-
-        adviceContent.innerHTML = finalHtml;
-    });
 }
 
-// Gemini AI 投資建議
-async function generateAIAdvice(stockData, analysis) {
-    const apiKey = getGeminiKey();
-    if (!apiKey) return null;
+// 以 AI 結果渲染投資建議區
+function displayAIAdvice(parsed, analysis) {
+    const adviceContent = document.getElementById('adviceContent');
+    const { signals } = analysis;
 
-    const { indicators, totalScore, techScore, fundScore, trendScore } = analysis;
+    const sections = [
+        ['投資評等', 'fa-award'],
+        ['理由摘要', 'fa-lightbulb'],
+        ['進場策略', 'fa-right-to-bracket'],
+        ['停損設定', 'fa-shield-halved'],
+        ['目標價位', 'fa-bullseye'],
+        ['風險提醒', 'fa-triangle-exclamation']
+    ];
+
+    let html = '';
+    const available = sections.filter(([key]) => parsed[key]);
+
+    if (available.length > 0) {
+        html += '<div class="advice-item positive" style="border-left-color:#8b5cf6; background:rgba(139,92,246,0.05);">';
+        html += '<strong>🤖 AI 投資建議</strong>';
+        available.forEach(([key, icon]) => {
+            html += `<div class="ai-advice-row">
+                <span class="ai-advice-key"><i class="fas ${icon}"></i> ${key}</span>
+                <span class="ai-advice-val">${formatAIText(parsed[key])}</span>
+            </div>`;
+        });
+        html += '</div>';
+    } else if (parsed.__raw) {
+        // 解析失敗就直接呈現原文，不要讓使用者看到空白
+        html += `<div class="advice-item positive" style="border-left-color:#8b5cf6; background:rgba(139,92,246,0.05);">
+            <strong>🤖 AI 投資建議</strong>
+            <div style="margin-top:8px; white-space:pre-wrap;">${formatAIText(parsed.__raw)}</div>
+        </div>`;
+    }
+
+    signals.forEach(signal => {
+        html += `<div class="advice-item ${signal.type}">• ${escapeHtml(signal.text)}</div>`;
+    });
+
+    adviceContent.innerHTML = html;
+}
+
+/**
+ * 解析 AI 的分段回覆。
+ * 要求 AI 以 ###欄位名### 分隔，容錯：解析不到就把原文放進 __raw。
+ */
+function parseAISections(text) {
+    const result = { __raw: text };
+    if (!text) return result;
+
+    // 以 ###欄位### 切段
+    const parts = text.split(/###\s*([^#\n]+?)\s*###/);
+    // parts[0] 是第一個標記前的內容，之後成對出現 [key, value]
+    for (let i = 1; i < parts.length - 1; i += 2) {
+        const key = parts[i].trim();
+        const value = (parts[i + 1] || '').trim();
+        if (key && value) result[key] = value;
+    }
+
+    return result;
+}
+
+/**
+ * 單次 Gemini 呼叫同時取得情緒判斷與投資建議。
+ * 原本分兩次呼叫（情緒 + 建議），送的技術指標幾乎相同，
+ * 在免費額度每分鐘 15 次的限制下很快就會觸發限流，因此合併。
+ */
+async function requestMergedAIAnalysis(stockData, analysis, newsItems) {
+    const { indicators, totalScore, techScore, trendScore } = analysis;
+    // positionScore 為評分重構後的名稱，fundScore 為舊名，兩者相容
+    const positionScore = analysis.positionScore ?? analysis.fundScore;
     const currencySymbol = stockData.currency === 'TWD' ? 'NT$' : '$';
 
-    const prompt = `你是一位資深投資顧問，請根據以下數據對「${stockData.name}（${stockData.symbol}）」給出具體的投資建議。
+    const newsTitles = newsItems && newsItems.length
+        ? newsItems.map((n, i) => `${i + 1}. ${n.title}`).join('\n')
+        : '（無法取得近期新聞）';
+
+    const prompt = `你是一位資深投資顧問。請根據以下資訊，對「${stockData.name}（${stockData.symbol}）」同時進行市場情緒分析與投資建議。
 
 【基本資訊】
 - 市場：${stockData.market === 'tw' ? '台股' : '美股'}
 - 現價：${currencySymbol}${stockData.currentPrice.toFixed(2)}
 - 前收盤：${currencySymbol}${stockData.previousClose.toFixed(2)}
 
-【綜合評分】
+【系統評分】
 - 總分：${totalScore}/100
-- 技術面：${techScore}/100
-- 基本面：${fundScore}/100
 - 趨勢面：${trendScore}/100
+- 動能面：${techScore}/100
+- 價格位階：${positionScore}/100
 
 【技術指標】
-- MA5: ${indicators.ma.ma5?.toFixed(2) || 'N/A'}, MA20: ${indicators.ma.ma20?.toFixed(2) || 'N/A'}, MA60: ${indicators.ma.ma60?.toFixed(2) || 'N/A'}
-- RSI(14): ${indicators.rsi?.toFixed(1) || 'N/A'}
-- MACD柱狀體: ${indicators.macd?.histogram?.toFixed(3) || 'N/A'}
-- KD: K=${indicators.kd?.k?.toFixed(1) || 'N/A'}, D=${indicators.kd?.d?.toFixed(1) || 'N/A'}
-- 成交量比: ${indicators.volume?.ratio?.toFixed(2) || 'N/A'}x (vs 20日均量)
-- 布林通道: 上軌${indicators.bollinger?.upper?.toFixed(2) || 'N/A'} / 中軌${indicators.bollinger?.middle?.toFixed(2) || 'N/A'} / 下軌${indicators.bollinger?.lower?.toFixed(2) || 'N/A'}
+- MA5: ${indicators.ma.ma5?.toFixed(2) ?? 'N/A'}, MA20: ${indicators.ma.ma20?.toFixed(2) ?? 'N/A'}, MA60: ${indicators.ma.ma60?.toFixed(2) ?? 'N/A'}
+- RSI(14): ${indicators.rsi?.toFixed(1) ?? 'N/A'}
+- MACD柱狀體: ${indicators.macd?.histogram?.toFixed(3) ?? 'N/A'}
+- KD: K=${indicators.kd?.k?.toFixed(1) ?? 'N/A'}, D=${indicators.kd?.d?.toFixed(1) ?? 'N/A'}
+- 成交量比: ${indicators.volume?.ratio?.toFixed(2) ?? 'N/A'}x (vs 20日均量)
+- 布林通道: 上軌${indicators.bollinger?.upper?.toFixed(2) ?? 'N/A'} / 中軌${indicators.bollinger?.middle?.toFixed(2) ?? 'N/A'} / 下軌${indicators.bollinger?.lower?.toFixed(2) ?? 'N/A'}
 
-請用繁體中文回覆，包含以下內容：
-1. 【投資評等】明確給出：強力買進 / 買進 / 中性 / 減碼 / 賣出
-2. 【理由摘要】30字內說明核心邏輯
-3. 【進場策略】建議的買入價位區間、分批策略
-4. 【停損設定】建議停損價位和百分比
-5. 【目標價位】短期（1-2週）和中期（1-3月）目標
-6. 【風險提醒】主要需注意的風險因素
+【近期新聞標題】
+${newsTitles}
 
-請簡潔有力，總字數不超過 300 字。`;
+請用繁體中文回覆，並嚴格依照以下格式輸出，每個欄位都要有，不要加入其他文字或 markdown 標題：
+
+###情緒分數###
+（0到100的整數，50為中性，大於50偏多，小於50偏空，只填數字）
+###情緒判斷###
+（偏多樂觀 / 中性觀望 / 偏空恐懼，三者選一）
+###新聞摘要###
+（2到3句總結近期新聞主要方向，若無新聞請說明資訊不足）
+###投資評等###
+（強力買進 / 買進 / 中性 / 減碼 / 賣出，五者選一）
+###理由摘要###
+（30字內說明核心邏輯）
+###進場策略###
+（建議買入價位區間與分批方式）
+###停損設定###
+（建議停損價位與百分比）
+###目標價位###
+（短期1-2週與中期1-3月目標）
+###風險提醒###
+（主要需注意的風險因素）`;
 
     const { text, error } = await callGemini(prompt, { temperature: 0.6, maxOutputTokens: 2048 });
-    if (error) console.warn('AI 投資建議生成失敗:', error);
-    return text;
+    if (error) {
+        console.warn('AI 分析失敗:', error);
+        return null;
+    }
+    return parseAISections(text);
 }
 
 // ===== 工具函數 =====
@@ -1324,7 +1458,12 @@ const STOCK_LISTS_FALLBACK = {
 };
 
 // 取得即時熱門股票（Yahoo Finance Trending）
-async function fetchTrendingTickers(region = 'US') {
+function fetchTrendingTickers(region = 'US') {
+    return cached(`trending:${region}`, CACHE_TTL.trending,
+        () => fetchTrendingTickersUncached(region));
+}
+
+async function fetchTrendingTickersUncached(region = 'US') {
     const url = `https://query1.finance.yahoo.com/v1/finance/trending/${region}?count=25`;
 
     const data = await fetchJsonViaProxy(url);
@@ -1599,7 +1738,12 @@ function getGeminiKey() {
 }
 
 // 抓取新聞（使用 Google News RSS proxy）
-async function fetchNews(stockName, symbol, market) {
+function fetchNews(stockName, symbol, market) {
+    return cached(`news:${market}:${symbol}`, CACHE_TTL.news,
+        () => fetchNewsUncached(stockName, symbol, market));
+}
+
+async function fetchNewsUncached(stockName, symbol, market) {
     const query = market === 'tw'
         ? `${stockName} 股票`
         : `${symbol} stock`;
@@ -1699,52 +1843,12 @@ function analyzeKeywordSentiment(newsItems) {
     return { items: results, overallScore: Math.round(normalizedScore), totalScore };
 }
 
-// Gemini AI 分析
-async function analyzeWithGemini(stockName, symbol, market, newsItems, indicators, currentPrice) {
-    const apiKey = getGeminiKey();
-    if (!apiKey) return null;
-
-    // 組合新聞標題
-    const newsTitles = newsItems
-        ? newsItems.map((n, i) => `${i + 1}. ${n.title}`).join('\n')
-        : '（無法取得近期新聞）';
-
-    // 組合技術指標摘要
-    const techSummary = `
-現價: ${currentPrice}
-MA5: ${indicators.ma.ma5?.toFixed(2) || 'N/A'}, MA20: ${indicators.ma.ma20?.toFixed(2) || 'N/A'}, MA60: ${indicators.ma.ma60?.toFixed(2) || 'N/A'}
-RSI(14): ${indicators.rsi?.toFixed(1) || 'N/A'}
-MACD柱狀體: ${indicators.macd?.histogram?.toFixed(2) || 'N/A'}
-KD: K=${indicators.kd?.k?.toFixed(1) || 'N/A'}, D=${indicators.kd?.d?.toFixed(1) || 'N/A'}
-成交量比: ${indicators.volume?.ratio?.toFixed(2) || 'N/A'}x
-布林通道位置: ${indicators.bollinger ? (currentPrice > indicators.bollinger.upper ? '上軌上方' : currentPrice < indicators.bollinger.lower ? '下軌下方' : '通道內') : 'N/A'}
-`.trim();
-
-    const prompt = `你是一位專業的股票分析師。請根據以下資訊，對「${stockName}（${symbol}）」進行市場情緒分析與買賣建議。
-
-【近期新聞標題】
-${newsTitles}
-
-【技術指標】
-${techSummary}
-
-請用繁體中文回覆，格式如下：
-1. 市場情緒判斷（看多/看空/中性，並給出 0-100 的情緒分數，50 為中性，>50 偏多，<50 偏空）
-2. 新聞面分析（2-3 句摘要近期新聞的主要方向）
-3. 技術面結合新聞的綜合判斷（3-4 句）
-4. 具體操作建議（建議買入/觀望/賣出，以及理由）
-
-請簡潔有力，不要超過 200 字。`;
-
-    const { text, error } = await callGemini(prompt, { temperature: 0.7, maxOutputTokens: 2048 });
-    if (error) console.error('Gemini 情緒分析失敗:', error);
-    return text;
-}
-
-// 主要情緒分析流程（在股票分析後自動呼叫）
-async function runSentimentAnalysis(stockData, analysis) {
+/**
+ * AI 分析主流程：抓新聞 → 單次 Gemini 呼叫 → 同時更新情緒區與建議區。
+ * 結果會快取，從篩選結果重複點進同一檔股票不會重打 API。
+ */
+async function runAIAnalysis(stockData, analysis) {
     const sentimentLoading = document.getElementById('sentimentLoading');
-    const sentimentContent = document.getElementById('sentimentContent');
     const sentimentBar = document.getElementById('sentimentBar');
     const sentimentBadge = document.getElementById('sentimentBadge');
     const sentimentScoreEl = document.getElementById('sentimentScore');
@@ -1754,45 +1858,46 @@ async function runSentimentAnalysis(stockData, analysis) {
     sentimentLoading.classList.remove('hidden');
 
     try {
-        // Step 1: 抓新聞
         const newsItems = await fetchNews(stockData.name, stockData.symbol, stockData.market);
 
-        // Step 2: 關鍵字情緒分析（作為基礎）
+        // 關鍵字情緒分析作為基礎（無 API Key 時的替代方案）
         let sentimentResult = { overallScore: 50, items: [] };
         if (newsItems && newsItems.length > 0) {
             sentimentResult = analyzeKeywordSentiment(newsItems);
         }
 
-        // Step 3: Gemini AI 分析（如果有 Key）
-        let aiText = null;
+        // 單次 Gemini 呼叫取得情緒 + 建議
+        let parsed = null;
         const apiKey = getGeminiKey();
         if (apiKey) {
-            aiText = await analyzeWithGemini(
-                stockData.name,
-                stockData.symbol,
-                stockData.market,
-                newsItems,
-                analysis.indicators,
-                stockData.currentPrice
-            );
+            // 快取鍵包含評分，指標變動時才會重新請求
+            const aiKey = `ai:${stockData.market}:${stockData.symbol}:${analysis.totalScore}`;
+            parsed = await cached(aiKey, CACHE_TTL.ai,
+                () => requestMergedAIAnalysis(stockData, analysis, newsItems));
 
-            // 嘗試從 AI 回覆中提取情緒分數
-            if (aiText) {
-                const scoreMatch = aiText.match(/情緒分數[：:]?\s*(\d+)/);
-                if (scoreMatch) {
-                    sentimentResult.overallScore = parseInt(scoreMatch[1]);
-                }
+            const aiScore = parseInt(parsed?.['情緒分數'], 10);
+            if (Number.isFinite(aiScore) && aiScore >= 0 && aiScore <= 100) {
+                sentimentResult.overallScore = aiScore;
             }
         }
 
-        // 顯示結果
         sentimentLoading.classList.add('hidden');
 
         // 情緒儀表
         const score = sentimentResult.overallScore;
         sentimentBar.style.width = `${score}%`;
 
-        if (score >= 65) {
+        const aiLabel = parsed?.['情緒判斷'];
+        if (aiLabel && /偏多|樂觀/.test(aiLabel)) {
+            sentimentBadge.textContent = '偏多樂觀';
+            sentimentBadge.className = 'sentiment-badge bullish';
+        } else if (aiLabel && /偏空|恐懼/.test(aiLabel)) {
+            sentimentBadge.textContent = '偏空恐懼';
+            sentimentBadge.className = 'sentiment-badge bearish';
+        } else if (aiLabel) {
+            sentimentBadge.textContent = '中性觀望';
+            sentimentBadge.className = 'sentiment-badge neutral';
+        } else if (score >= 65) {
             sentimentBadge.textContent = '偏多樂觀';
             sentimentBadge.className = 'sentiment-badge bullish';
         } else if (score <= 35) {
@@ -1802,11 +1907,14 @@ async function runSentimentAnalysis(stockData, analysis) {
             sentimentBadge.textContent = '中性觀望';
             sentimentBadge.className = 'sentiment-badge neutral';
         }
-        sentimentScoreEl.textContent = `情緒分數：${score}/100`;
 
-        // AI 分析內容
-        if (aiText) {
-            aiAnalysisEl.innerHTML = `<div style="white-space:pre-wrap;">${formatAIText(aiText)}</div>`;
+        sentimentScoreEl.textContent = `情緒分數：${score}/100${parsed?.['情緒分數'] ? '' : '（關鍵字推估）'}`;
+
+        // 情緒區只顯示新聞面摘要，投資建議交給建議區，避免兩處重複
+        if (parsed?.['新聞摘要']) {
+            aiAnalysisEl.innerHTML = `<div style="white-space:pre-wrap;">${formatAIText(parsed['新聞摘要'])}</div>`;
+        } else if (parsed?.__raw) {
+            aiAnalysisEl.innerHTML = `<div style="white-space:pre-wrap;">${formatAIText(parsed.__raw)}</div>`;
         } else if (!apiKey) {
             aiAnalysisEl.innerHTML = `<p class="news-placeholder">請設定 Gemini API Key 以啟用 AI 深度分析<br><small>（目前使用關鍵字規則判斷情緒）</small></p>`;
         } else {
@@ -1814,6 +1922,13 @@ async function runSentimentAnalysis(stockData, analysis) {
                 ? `<br><small style="color:#f87171">原因：${escapeHtml(lastGeminiError)}</small>`
                 : '';
             aiAnalysisEl.innerHTML = `<p class="news-placeholder">AI 分析暫時無法取得，已使用關鍵字分析作為替代${detail}</p>`;
+        }
+
+        // 投資建議區：AI 有結果就覆蓋規則式建議
+        if (parsed) {
+            displayAIAdvice(parsed, analysis);
+        } else {
+            displayRuleBasedAdvice(analysis, { pending: false });
         }
 
         // 新聞列表
@@ -1843,8 +1958,10 @@ async function runSentimentAnalysis(stockData, analysis) {
         }
 
     } catch (error) {
-        console.error('情緒分析錯誤:', error);
+        console.error('AI 分析錯誤:', error);
         sentimentLoading.classList.add('hidden');
-        aiAnalysisEl.innerHTML = `<p class="news-placeholder">情緒分析發生錯誤：${escapeHtml(error.message)}</p>`;
+        aiAnalysisEl.innerHTML = `<p class="news-placeholder">AI 分析發生錯誤：${escapeHtml(error.message)}</p>`;
+        // AI 失敗不應讓建議區卡在載入狀態
+        displayRuleBasedAdvice(analysis, { pending: false });
     }
 }
